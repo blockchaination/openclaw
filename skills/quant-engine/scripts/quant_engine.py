@@ -21,6 +21,8 @@ from paper_broker import PaperBroker
 from risk import allow_trade
 from strategy import maker_first_mean_reversion
 
+MAX_LIVE_ORDER_USD = 10
+
 
 def _repo_root() -> Path:
     """Return repo root (parent of skills/)."""
@@ -524,6 +526,7 @@ def _run_one_cycle(
     runtime_mode: str,
     broker: PaperBroker,
     iteration: int,
+    enable_live_orders: bool = False,
 ) -> dict:
     """Run one paper-trading cycle. Returns the result dict."""
     ticker = run_kraken_reader(["--format", "json", "ticker", "--pair", pair])
@@ -592,14 +595,29 @@ def _run_one_cycle(
     fills: list[dict] = []
     skipped_reason: str | None = None
     live_mode_blocked = False
+    live_order_ready: dict | None = None
 
     if action in ("buy", "sell"):
         if action == "sell" and broker.position_units <= 0:
             skipped_reason = "no_inventory_to_sell"
         elif not risk_result.get("allowed"):
             skipped_reason = "risk_blocked"
-        elif runtime_mode == "live":
+        elif runtime_mode == "live" and not enable_live_orders:
             live_mode_blocked = True
+        elif runtime_mode == "live" and enable_live_orders:
+            ordertype = "limit" if execution_mode == "maker" else "market"
+            if ordertype == "limit":
+                price = best_bid if action == "buy" else best_ask
+            else:
+                price = None
+            size_units = usd_order_size / current_mid_price
+            live_order_ready = {
+                "side": action,
+                "ordertype": ordertype,
+                "volume": size_units,
+                "price": price,
+                "size_usd": usd_order_size,
+            }
         else:
             size_units = usd_order_size / current_mid_price
             if execution_mode == "taker":
@@ -660,6 +678,7 @@ def _run_one_cycle(
             "total_pnl_usd": pnl["total_pnl_usd"],
         },
         "live_mode_blocked": live_mode_blocked,
+        "live_order_ready": live_order_ready,
     }
 
 
@@ -680,9 +699,13 @@ def _build_status(
     pos_units = broker.get("position_units", 0.0)
     mid = _safe_float(market.get("mid_price"))
     position_usd = pos_units * mid if mid > 0 else 0.0
-    last_action = (
-        "submitted" if order.get("submitted") else (order.get("skipped_reason") or "hold")
-    )
+    live_outcome = r.get("live_order_outcome")
+    if live_outcome:
+        last_action = live_outcome
+    else:
+        last_action = (
+            "submitted" if order.get("submitted") else (order.get("skipped_reason") or "hold")
+        )
     return {
         "timestamp": r.get("timestamp_utc")
         or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -750,7 +773,12 @@ def main() -> int:
     parser.add_argument(
         "--live",
         action="store_true",
-        help="Runtime mode: live. Real Kraken execution not yet enabled.",
+        help="Runtime mode: live. Requires --enable-live-orders for real execution.",
+    )
+    parser.add_argument(
+        "--enable-live-orders",
+        action="store_true",
+        help="Enable real Kraken orders. Requires --live. Default: observation only.",
     )
     parser.add_argument(
         "--paper",
@@ -823,7 +851,14 @@ def main() -> int:
     if args.live and args.paper:
         print("Error: cannot specify both --live and --paper", file=sys.stderr)
         return 1
+    if args.enable_live_orders and not args.live:
+        print(
+            "Error: --enable-live-orders requires --live",
+            file=sys.stderr,
+        )
+        return 1
     runtime_mode = "live" if args.live else "paper"
+    enable_live_orders = bool(args.enable_live_orders)
 
     check_modes = sum(
         [bool(args.check_kraken_auth), bool(args.check_kraken_add_order), bool(args.check_kraken_cancel_order)]
@@ -1028,6 +1063,7 @@ def main() -> int:
                 runtime_mode,
                 broker,
                 iteration=i + 1,
+                enable_live_orders=enable_live_orders,
             )
             last_result = result
 
@@ -1035,6 +1071,142 @@ def main() -> int:
             order = result.get("order", {})
             skip = order.get("skipped_reason")
             live_blocked = result.get("live_mode_blocked", False)
+            live_order_ready = result.get("live_order_ready")
+
+            if live_order_ready and runtime_mode == "live" and enable_live_orders:
+                ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                side = live_order_ready["side"]
+                ordertype = live_order_ready["ordertype"]
+                size_usd = live_order_ready["size_usd"]
+                volume = live_order_ready["volume"]
+                price = live_order_ready.get("price")
+                if ordertype == "limit" and (price is None or price <= 0):
+                    append_trade_event(
+                        trade_events_path,
+                        {
+                            "timestamp": ts,
+                            "event_type": "live_order_blocked",
+                            "pair": pair,
+                            "runtime_mode": runtime_mode,
+                            "execution_mode": execution_mode,
+                            "side": side,
+                            "order_type": ordertype,
+                            "size_usd": size_usd,
+                            "reason": "no_limit_price",
+                        },
+                    )
+                    result["live_order_outcome"] = "live_blocked"
+                elif not (isinstance(volume, (int, float)) and volume > 0):
+                    append_trade_event(
+                        trade_events_path,
+                        {
+                            "timestamp": ts,
+                            "event_type": "live_order_blocked",
+                            "pair": pair,
+                            "runtime_mode": runtime_mode,
+                            "execution_mode": execution_mode,
+                            "side": side,
+                            "order_type": ordertype,
+                            "size_usd": size_usd,
+                            "volume": volume,
+                            "reason": "invalid_order_volume",
+                        },
+                    )
+                    result["live_order_outcome"] = "live_blocked"
+                elif size_usd > MAX_LIVE_ORDER_USD:
+                    append_trade_event(
+                        trade_events_path,
+                        {
+                            "timestamp": ts,
+                            "event_type": "live_order_blocked",
+                            "pair": pair,
+                            "runtime_mode": runtime_mode,
+                            "execution_mode": execution_mode,
+                            "side": side,
+                            "order_type": ordertype,
+                            "size_usd": size_usd,
+                            "reason": "max_live_order_usd_exceeded",
+                        },
+                    )
+                    result["live_order_outcome"] = "live_blocked"
+                else:
+                    try:
+                        append_trade_event(
+                            trade_events_path,
+                            {
+                                "timestamp": ts,
+                                "event_type": "live_order_submission_started",
+                                "pair": pair,
+                                "runtime_mode": runtime_mode,
+                                "execution_mode": execution_mode,
+                                "side": side,
+                                "order_type": ordertype,
+                                "size_usd": size_usd,
+                                "volume": volume,
+                                "price": price,
+                            },
+                        )
+                        kraken_auth = _kraken_auth_module()
+                        api_key, api_secret = kraken_auth.load_credentials()
+                        resp = kraken_auth.add_order(
+                            api_key,
+                            api_secret,
+                            pair=pair,
+                            side=side,
+                            ordertype=ordertype,
+                            volume=volume,
+                            price=price if ordertype == "limit" else None,
+                            validate=False,
+                        )
+                        txid = ""
+                        res = resp.get("result") or {}
+                        if isinstance(res, dict):
+                            raw_txid = res.get("txid", [])
+                            if isinstance(raw_txid, list) and raw_txid:
+                                txid = raw_txid[0] if isinstance(raw_txid[0], str) else str(raw_txid[0])
+                            elif isinstance(raw_txid, str):
+                                txid = raw_txid
+                            else:
+                                txid = str(raw_txid) if raw_txid else ""
+                        ev = {
+                            "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime(
+                                "%Y-%m-%dT%H:%M:%SZ"
+                            ),
+                            "event_type": "live_order_submitted",
+                            "pair": pair,
+                            "runtime_mode": runtime_mode,
+                            "execution_mode": execution_mode,
+                            "side": side,
+                            "order_type": ordertype,
+                            "size_usd": size_usd,
+                            "volume": volume,
+                            "price": price,
+                        }
+                        if txid:
+                            ev["txid"] = txid
+                        append_trade_event(trade_events_path, ev)
+                        result["live_order_outcome"] = "live_submitted"
+                    except RuntimeError as e:
+                        err_msg = str(e)
+                        append_trade_event(
+                            trade_events_path,
+                            {
+                                "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ"
+                                ),
+                                "event_type": "live_order_submission_failed",
+                                "pair": pair,
+                                "runtime_mode": runtime_mode,
+                                "execution_mode": execution_mode,
+                                "side": side,
+                                "order_type": ordertype,
+                                "size_usd": size_usd,
+                                "volume": volume,
+                                "reason": err_msg,
+                            },
+                        )
+                        result["live_order_outcome"] = "live_failed"
+                        result["live_order_error"] = err_msg
 
             if action in ("buy", "sell"):
                 append_trade_event(
@@ -1119,7 +1291,8 @@ def main() -> int:
                         },
                     )
 
-            status = _build_status(result, False, None, None, pair_fallback=pair)
+            status_err = result.get("live_order_error") if result.get("live_order_outcome") == "live_failed" else None
+            status = _build_status(result, False, None, status_err, pair_fallback=pair)
             write_status(status_path, status)
 
             print(json.dumps(result, indent=2))
