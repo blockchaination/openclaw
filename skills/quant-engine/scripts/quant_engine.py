@@ -699,8 +699,11 @@ def _build_status(
     pos_units = broker.get("position_units", 0.0)
     mid = _safe_float(market.get("mid_price"))
     position_usd = pos_units * mid if mid > 0 else 0.0
+    forced_outcome = r.get("forced_live_test_buy_outcome")
     live_outcome = r.get("live_order_outcome")
-    if live_outcome:
+    if forced_outcome:
+        last_action = forced_outcome
+    elif live_outcome:
         last_action = live_outcome
     else:
         last_action = (
@@ -781,6 +784,11 @@ def main() -> int:
         help="Enable real Kraken orders. Requires --live. Default: observation only.",
     )
     parser.add_argument(
+        "--force-live-test-buy",
+        action="store_true",
+        help="One-off: force one BUY market order on iteration 1. Requires --live and --enable-live-orders.",
+    )
+    parser.add_argument(
         "--paper",
         action="store_true",
         help="Runtime mode: paper (default).",
@@ -857,8 +865,15 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    if args.force_live_test_buy and not (args.live and args.enable_live_orders):
+        print(
+            "Error: --force-live-test-buy requires both --live and --enable-live-orders",
+            file=sys.stderr,
+        )
+        return 1
     runtime_mode = "live" if args.live else "paper"
     enable_live_orders = bool(args.enable_live_orders)
+    force_live_test_buy = bool(args.force_live_test_buy)
 
     check_modes = sum(
         [bool(args.check_kraken_auth), bool(args.check_kraken_add_order), bool(args.check_kraken_cancel_order)]
@@ -1073,7 +1088,118 @@ def main() -> int:
             live_blocked = result.get("live_mode_blocked", False)
             live_order_ready = result.get("live_order_ready")
 
-            if live_order_ready and runtime_mode == "live" and enable_live_orders:
+            if force_live_test_buy and i == 0:
+                ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                mid = _safe_float(result.get("market", {}).get("mid_price"))
+                size_usd = usd_order_size
+                volume = size_usd / mid if mid > 0 else 0.0
+                append_trade_event(
+                    trade_events_path,
+                    {
+                        "timestamp": ts,
+                        "event_type": "forced_live_test_buy_started",
+                        "pair": pair,
+                        "runtime_mode": runtime_mode,
+                        "execution_mode": "taker",
+                        "side": "buy",
+                        "order_type": "market",
+                        "size_usd": size_usd,
+                        "volume": volume,
+                    },
+                )
+                if not (isinstance(volume, (int, float)) and volume > 0):
+                    append_trade_event(
+                        trade_events_path,
+                        {
+                            "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime(
+                                "%Y-%m-%dT%H:%M:%SZ"
+                            ),
+                            "event_type": "forced_live_test_buy_blocked",
+                            "pair": pair,
+                            "runtime_mode": runtime_mode,
+                            "side": "buy",
+                            "size_usd": size_usd,
+                            "volume": volume,
+                            "reason": "invalid_order_volume",
+                        },
+                    )
+                    result["forced_live_test_buy_outcome"] = "forced_live_test_buy_blocked"
+                elif size_usd > MAX_LIVE_ORDER_USD:
+                    append_trade_event(
+                        trade_events_path,
+                        {
+                            "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime(
+                                "%Y-%m-%dT%H:%M:%SZ"
+                            ),
+                            "event_type": "forced_live_test_buy_blocked",
+                            "pair": pair,
+                            "runtime_mode": runtime_mode,
+                            "side": "buy",
+                            "size_usd": size_usd,
+                            "reason": "max_live_order_usd_exceeded",
+                        },
+                    )
+                    result["forced_live_test_buy_outcome"] = "forced_live_test_buy_blocked"
+                else:
+                    try:
+                        kraken_auth = _kraken_auth_module()
+                        api_key, api_secret = kraken_auth.load_credentials()
+                        resp = kraken_auth.add_order(
+                            api_key,
+                            api_secret,
+                            pair=pair,
+                            side="buy",
+                            ordertype="market",
+                            volume=volume,
+                            price=None,
+                            validate=False,
+                        )
+                        txid = ""
+                        res = resp.get("result") or {}
+                        if isinstance(res, dict):
+                            raw_txid = res.get("txid", [])
+                            if isinstance(raw_txid, list) and raw_txid:
+                                txid = raw_txid[0] if isinstance(raw_txid[0], str) else str(raw_txid[0])
+                            elif isinstance(raw_txid, str):
+                                txid = raw_txid
+                            else:
+                                txid = str(raw_txid) if raw_txid else ""
+                        ev = {
+                            "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime(
+                                "%Y-%m-%dT%H:%M:%SZ"
+                            ),
+                            "event_type": "forced_live_test_buy_submitted",
+                            "pair": pair,
+                            "runtime_mode": runtime_mode,
+                            "side": "buy",
+                            "order_type": "market",
+                            "size_usd": size_usd,
+                            "volume": volume,
+                        }
+                        if txid:
+                            ev["txid"] = txid
+                        append_trade_event(trade_events_path, ev)
+                        result["forced_live_test_buy_outcome"] = "forced_live_test_buy_submitted"
+                    except RuntimeError as e:
+                        err_msg = str(e)
+                        append_trade_event(
+                            trade_events_path,
+                            {
+                                "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ"
+                                ),
+                                "event_type": "forced_live_test_buy_failed",
+                                "pair": pair,
+                                "runtime_mode": runtime_mode,
+                                "side": "buy",
+                                "size_usd": size_usd,
+                                "volume": volume,
+                                "reason": err_msg,
+                            },
+                        )
+                        result["forced_live_test_buy_outcome"] = "forced_live_test_buy_failed"
+                        result["forced_live_test_buy_error"] = err_msg
+            elif live_order_ready and runtime_mode == "live" and enable_live_orders:
                 ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 side = live_order_ready["side"]
                 ordertype = live_order_ready["ordertype"]
@@ -1291,7 +1417,11 @@ def main() -> int:
                         },
                     )
 
-            status_err = result.get("live_order_error") if result.get("live_order_outcome") == "live_failed" else None
+            status_err = None
+            if result.get("live_order_outcome") == "live_failed":
+                status_err = result.get("live_order_error")
+            elif result.get("forced_live_test_buy_outcome") == "forced_live_test_buy_failed":
+                status_err = result.get("forced_live_test_buy_error")
             status = _build_status(result, False, None, status_err, pair_fallback=pair)
             write_status(status_path, status)
 
