@@ -130,6 +130,9 @@ def main() -> int:
     n_live_order_submitted = sum(1 for e in events if e.get("event_type") == "live_order_submitted")
     n_live_order_failed = sum(1 for e in events if e.get("event_type") == "live_order_submission_failed")
     n_forced_buy = sum(1 for e in events if e.get("event_type") == "forced_live_test_buy_submitted")
+    n_sell_suppressed = sum(
+        1 for e in events if e.get("event_type") == "sell_suppressed_low_inventory"
+    )
     n_engine_error = sum(1 for e in events if e.get("event_type") == "engine_error")
 
     # Last buy/sell signal timestamps
@@ -148,10 +151,16 @@ def main() -> int:
         if last_buy_ts is not None and last_sell_ts is not None:
             break
 
-    # Blocked-reason summary (from live_mode_blocked, live_order_blocked, forced_live_test_buy_blocked)
+    # Blocked-reason summary (from live_mode_blocked, live_order_blocked, forced_live_test_buy_blocked, sell_suppressed_low_inventory)
     blocked_events = [
         e for e in events
-        if e.get("event_type") in ("live_mode_blocked", "live_order_blocked", "forced_live_test_buy_blocked")
+        if e.get("event_type")
+        in (
+            "live_mode_blocked",
+            "live_order_blocked",
+            "forced_live_test_buy_blocked",
+            "sell_suppressed_low_inventory",
+        )
     ]
     reason_counts: dict[str, int] = {}
     for e in blocked_events:
@@ -246,6 +255,7 @@ def main() -> int:
         lines.append(f"  last sell signal:         {last_sell_ts.strftime('%Y-%m-%d %H:%M:%S')} UTC")
     lines.append(f"signal bias:               {signal_bias}")
     lines.append(f"live_mode_blocked:         {n_live_mode_blocked}")
+    lines.append(f"sell_suppressed_low_inventory: {n_sell_suppressed}")
     lines.append(f"live_order_submitted:      {n_live_order_submitted}")
     lines.append(f"live_order_submission_failed: {n_live_order_failed}")
     lines.append(f"forced_live_test_buy_submitted: {n_forced_buy}")

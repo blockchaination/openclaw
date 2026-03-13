@@ -22,6 +22,7 @@ from risk import allow_trade
 from strategy import maker_first_mean_reversion
 
 MAX_LIVE_ORDER_USD = 10
+MIN_XBT_TO_SELL = 0.0002
 
 
 def _repo_root() -> Path:
@@ -619,18 +620,20 @@ def _run_one_cycle(
     live_order_ready: dict | None = None
 
     if action in ("buy", "sell"):
-        sell_eligible = (
-            (live_account.get("xbt", 0) > 0)
-            if (runtime_mode == "live" and live_account is not None)
-            else (broker.position_units > 0)
-        )
-        if action == "sell" and not sell_eligible:
-            skipped_reason = "no_inventory_to_sell"
-        elif not risk_result.get("allowed"):
+        if runtime_mode == "live" and live_account is not None:
+            xbt = live_account.get("xbt", 0) or 0
+            sell_eligible = xbt >= MIN_XBT_TO_SELL
+            if action == "sell" and not sell_eligible:
+                skipped_reason = "sell_suppressed_low_inventory"
+        else:
+            sell_eligible = broker.position_units > 0
+            if action == "sell" and not sell_eligible:
+                skipped_reason = "no_inventory_to_sell"
+        if skipped_reason is None and not risk_result.get("allowed"):
             skipped_reason = "risk_blocked"
-        elif runtime_mode == "live" and not enable_live_orders:
+        elif skipped_reason is None and runtime_mode == "live" and not enable_live_orders:
             live_mode_blocked = True
-        elif runtime_mode == "live" and enable_live_orders:
+        elif skipped_reason is None and runtime_mode == "live" and enable_live_orders:
             ordertype = "limit" if execution_mode == "maker" else "market"
             if ordertype == "limit":
                 price = best_bid if action == "buy" else best_ask
@@ -644,7 +647,7 @@ def _run_one_cycle(
                 "price": price,
                 "size_usd": usd_order_size,
             }
-        else:
+        elif skipped_reason is None:
             size_units = usd_order_size / current_mid_price
             if execution_mode == "taker":
                 if action == "buy":
@@ -1394,6 +1397,20 @@ def main() -> int:
                         "iteration": i + 1,
                         "side": action,
                         "reason": "risk_blocked",
+                    },
+                )
+            if skip == "sell_suppressed_low_inventory":
+                append_trade_event(
+                    trade_events_path,
+                    {
+                        "timestamp": result.get("timestamp_utc", ""),
+                        "event_type": "sell_suppressed_low_inventory",
+                        "pair": pair,
+                        "runtime_mode": runtime_mode,
+                        "execution_mode": execution_mode,
+                        "iteration": i + 1,
+                        "side": "sell",
+                        "reason": "sell_suppressed_low_inventory",
                     },
                 )
             if live_blocked:
