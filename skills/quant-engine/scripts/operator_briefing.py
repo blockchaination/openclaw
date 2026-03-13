@@ -132,6 +132,62 @@ def main() -> int:
     n_forced_buy = sum(1 for e in events if e.get("event_type") == "forced_live_test_buy_submitted")
     n_engine_error = sum(1 for e in events if e.get("event_type") == "engine_error")
 
+    # Last buy/sell signal timestamps
+    last_buy_ts = None
+    last_sell_ts = None
+    for e in reversed(events):
+        if e.get("event_type") != "signal_generated":
+            continue
+        ts = _parse_ts(e.get("timestamp", ""))
+        if ts is None:
+            continue
+        if e.get("side") == "buy" and last_buy_ts is None:
+            last_buy_ts = ts
+        elif e.get("side") == "sell" and last_sell_ts is None:
+            last_sell_ts = ts
+        if last_buy_ts is not None and last_sell_ts is not None:
+            break
+
+    # Blocked-reason summary (from live_mode_blocked, live_order_blocked, forced_live_test_buy_blocked)
+    blocked_events = [
+        e for e in events
+        if e.get("event_type") in ("live_mode_blocked", "live_order_blocked", "forced_live_test_buy_blocked")
+    ]
+    reason_counts: dict[str, int] = {}
+    for e in blocked_events:
+        r = e.get("reason") or "unknown"
+        reason_counts[r] = reason_counts.get(r, 0) + 1
+    blocked_reasons = sorted(reason_counts.items(), key=lambda x: -x[1])  # most common first
+
+    # Signal bias
+    if n_signals == 0:
+        signal_bias = "no signals"
+    elif n_buy > 0 and n_sell == 0:
+        signal_bias = "strongly buy-biased"
+    elif n_sell > 0 and n_buy == 0:
+        signal_bias = "strongly sell-biased"
+    elif n_buy > 0 and n_sell > 0:
+        ratio = max(n_buy, n_sell) / min(n_buy, n_sell)
+        if ratio >= 2:
+            signal_bias = "sell-biased" if n_sell > n_buy else "buy-biased"
+        else:
+            signal_bias = "balanced"
+    else:
+        signal_bias = "balanced"
+
+    # Position/actionability hint (from live_account)
+    live_account = status.get("live_account") if status else None
+    if live_account is not None:
+        xbt = live_account.get("xbt", 0) or 0
+        has_xbt = xbt > 0.0001  # meaningful threshold
+        actionability_hint = (
+            "Bot currently has XBT inventory available for sells"
+            if has_xbt
+            else "Bot currently has no meaningful XBT inventory for sells"
+        )
+    else:
+        actionability_hint = "Live balances unknown (no snapshot)"
+
     # Most recent engine_started / engine_stopped (from events in window)
     last_started = None
     last_stopped = None
@@ -184,6 +240,11 @@ def main() -> int:
     lines.append(f"  sell signals:             {n_sell}")
     if n_hold > 0:
         lines.append(f"  holds:                    {n_hold}")
+    if last_buy_ts is not None:
+        lines.append(f"  last buy signal:          {last_buy_ts.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    if last_sell_ts is not None:
+        lines.append(f"  last sell signal:         {last_sell_ts.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    lines.append(f"signal bias:               {signal_bias}")
     lines.append(f"live_mode_blocked:         {n_live_mode_blocked}")
     lines.append(f"live_order_submitted:      {n_live_order_submitted}")
     lines.append(f"live_order_submission_failed: {n_live_order_failed}")
@@ -195,27 +256,41 @@ def main() -> int:
         lines.append(f"last engine_stopped:        {last_stopped.strftime('%Y-%m-%d %H:%M:%S')} UTC")
     lines.append("")
 
-    # Operator summary
+    # Blocked-reason summary
+    if blocked_reasons:
+        lines.append("--- Blocked reasons (in window) ---")
+        for reason, count in blocked_reasons:
+            lines.append(f"  {reason}: {count}")
+        lines.append("")
+
+    # Position/actionability hint
+    lines.append("--- Actionability ---")
+    lines.append(actionability_hint)
+    lines.append("")
+
+    # Operator summary (sharper)
     lines.append("--- Operator summary ---")
     summary_parts: list[str] = []
     summary_parts.append(f"Pair {pair} in {runtime}/{execution} mode.")
     if kill_active:
-        summary_parts.append("Kill switch is ACTIVE; no orders will execute.")
+        summary_parts.append("Kill switch ACTIVE; no orders will execute.")
     else:
         summary_parts.append("Kill switch inactive.")
-    summary_parts.append(f"In the window: {n_signals} signals ({n_buy} buy, {n_sell} sell).")
+    summary_parts.append(f"Signal mix: {signal_bias} ({n_signals} signals: {n_buy} buy, {n_sell} sell).")
+    if blocked_reasons:
+        top = blocked_reasons[0]
+        summary_parts.append(f"Bot was blocked: {top[1]}x {top[0]}.")
+    else:
+        summary_parts.append("No blocks in window.")
+    summary_parts.append(actionability_hint + ".")
     if n_live_order_submitted > 0:
         summary_parts.append(f"{n_live_order_submitted} live order(s) submitted.")
-    if n_live_order_failed > 0:
+    elif n_live_order_failed > 0:
         summary_parts.append(f"{n_live_order_failed} live order submission(s) failed.")
-    if n_live_mode_blocked > 0:
-        summary_parts.append(f"{n_live_mode_blocked} live_mode_blocked (e.g. no XBT balance).")
     if n_forced_buy > 0:
-        summary_parts.append(f"{n_forced_buy} forced live test buy(s) submitted.")
+        summary_parts.append(f"{n_forced_buy} forced live test buy(s).")
     if n_engine_error > 0:
-        summary_parts.append(f"WARNING: {n_engine_error} engine_error(s) in window.")
-    if not summary_parts:
-        summary_parts.append("No notable activity in window.")
+        summary_parts.append(f"WARNING: {n_engine_error} engine_error(s).")
     lines.append(" ".join(summary_parts))
     lines.append("")
     lines.append(f"files: {status_path} | {events_path}")
