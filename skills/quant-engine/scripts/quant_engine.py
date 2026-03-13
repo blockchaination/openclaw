@@ -1100,7 +1100,7 @@ def main() -> int:
                 print(f"--- iteration {i + 1}/{iterations} ---", file=sys.stderr)
             live_account = (
                 _fetch_live_account_snapshot(pair)
-                if (runtime_mode == "live" and enable_live_orders)
+                if runtime_mode == "live"
                 else None
             )
             result = _run_one_cycle(
