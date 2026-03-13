@@ -56,3 +56,18 @@ PYTHONPATH=skills/quant-engine/scripts python3 skills/quant-engine/scripts/quant
 ```
 
 The kill switch (`/tmp/openclaw.kill`) applies to both the service and manual runs.
+
+## Operator status command
+
+Print a compact status summary from the logs (read-only; does not affect trading):
+
+```bash
+cd /opt/openclaw-kraken-quant
+python3 skills/quant-engine/scripts/operator_status.py
+```
+
+Optional arguments:
+
+- `--status-file PATH` — override status JSON path (default: `logs/status.json`)
+- `--trade-events-file PATH` — override trade events JSONL path (default: `logs/trade_events.jsonl`)
+- `--tail N` — show last N trade events (default: 10)
