@@ -71,3 +71,27 @@ Optional arguments:
 - `--status-file PATH` — override status JSON path (default: `logs/status.json`)
 - `--trade-events-file PATH` — override trade events JSONL path (default: `logs/trade_events.jsonl`)
 - `--tail N` — show last N trade events (default: 10)
+
+## Operator briefing (daily / weekly)
+
+Generate a compact briefing from logs (read-only; does not affect trading):
+
+**Daily briefing (last 24 hours, default):**
+
+```bash
+cd /opt/openclaw-kraken-quant
+python3 skills/quant-engine/scripts/operator_briefing.py
+```
+
+**Weekly briefing (last 7 days):**
+
+```bash
+python3 skills/quant-engine/scripts/operator_briefing.py --days 7
+```
+
+Optional arguments:
+
+- `--hours N` — briefing window: last N hours
+- `--days N` — briefing window: last N days
+- `--status-file PATH` — override status JSON path
+- `--trade-events-file PATH` — override trade events JSONL path
