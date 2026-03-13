@@ -86,6 +86,26 @@ def _kraken_reader_path() -> Path:
     return this_dir.parent.parent / "kraken-reader" / "scripts" / "kraken_reader.py"
 
 
+def _fetch_live_account_snapshot(pair: str) -> dict | None:
+    """
+    Fetch Kraken balance snapshot for live mode.
+    Returns {"usd": float, "xbt": float} or None on failure.
+    Uses Kraken asset names: XXBT, ZUSD.
+    """
+    try:
+        kraken_auth = _kraken_auth_module()
+        api_key, api_secret = kraken_auth.load_credentials()
+        data = kraken_auth.get_account_balance(api_key, api_secret)
+        result = data.get("result") or {}
+        if not isinstance(result, dict):
+            return None
+        usd = _safe_float(result.get("ZUSD", 0))
+        xbt = _safe_float(result.get("XXBT", 0))
+        return {"usd": usd, "xbt": xbt}
+    except RuntimeError:
+        return None
+
+
 def _kraken_auth_module():
     """Load kraken_auth from skills/kraken-reader/scripts. Returns the module."""
     import importlib.util
@@ -527,6 +547,7 @@ def _run_one_cycle(
     broker: PaperBroker,
     iteration: int,
     enable_live_orders: bool = False,
+    live_account: dict | None = None,
 ) -> dict:
     """Run one paper-trading cycle. Returns the result dict."""
     ticker = run_kraken_reader(["--format", "json", "ticker", "--pair", pair])
@@ -598,7 +619,12 @@ def _run_one_cycle(
     live_order_ready: dict | None = None
 
     if action in ("buy", "sell"):
-        if action == "sell" and broker.position_units <= 0:
+        sell_eligible = (
+            (live_account.get("xbt", 0) > 0)
+            if (runtime_mode == "live" and live_account is not None)
+            else (broker.position_units > 0)
+        )
+        if action == "sell" and not sell_eligible:
             skipped_reason = "no_inventory_to_sell"
         elif not risk_result.get("allowed"):
             skipped_reason = "risk_blocked"
@@ -679,6 +705,7 @@ def _run_one_cycle(
         },
         "live_mode_blocked": live_mode_blocked,
         "live_order_ready": live_order_ready,
+        "live_account": live_account,
     }
 
 
@@ -727,6 +754,7 @@ def _build_status(
         "risk_ok": risk.get("allowed", True),
         "shutdown_reason": shutdown_reason,
         "error": error,
+        **({"live_account": r["live_account"]} if r.get("live_account") is not None else {}),
     }
 
 
@@ -1070,6 +1098,11 @@ def main() -> int:
 
             if iterations > 1:
                 print(f"--- iteration {i + 1}/{iterations} ---", file=sys.stderr)
+            live_account = (
+                _fetch_live_account_snapshot(pair)
+                if (runtime_mode == "live" and enable_live_orders)
+                else None
+            )
             result = _run_one_cycle(
                 pair,
                 usd_order_size,
@@ -1079,6 +1112,7 @@ def main() -> int:
                 broker,
                 iteration=i + 1,
                 enable_live_orders=enable_live_orders,
+                live_account=live_account,
             )
             last_result = result
 
