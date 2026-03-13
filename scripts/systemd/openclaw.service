@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenClaw Kraken Quant Engine (observation mode)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/openclaw-kraken-quant
+Environment=PYTHONPATH=/opt/openclaw-kraken-quant/skills/quant-engine/scripts
+EnvironmentFile=-/root/.openclaw-kraken.env
+ExecStart=/usr/bin/python3 /opt/openclaw-kraken-quant/skills/quant-engine/scripts/quant_engine.py --pair XBTUSD --live --sleep-seconds 2 --iterations 999999999
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
