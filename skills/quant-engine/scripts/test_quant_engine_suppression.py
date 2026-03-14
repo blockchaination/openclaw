@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Minimal tests for buy/sell suppression (MIN_USD_TO_BUY, MIN_XBT_TO_SELL) in quant_engine.
+Minimal tests for buy/sell suppression and cooldown in quant_engine.
 
 Run: python -m pytest skills/quant-engine/scripts/test_quant_engine_suppression.py -v
 Or from scripts dir: python -m pytest test_quant_engine_suppression.py -v
@@ -8,7 +8,10 @@ Or from scripts dir: python -m pytest test_quant_engine_suppression.py -v
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Add scripts dir to path so we can import quant_engine
@@ -16,7 +19,12 @@ _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
-from quant_engine import MIN_USD_TO_BUY, MIN_XBT_TO_SELL
+from quant_engine import (
+    MIN_SECONDS_BETWEEN_SAME_SIDE_ACTIONS,
+    MIN_USD_TO_BUY,
+    MIN_XBT_TO_SELL,
+    _last_same_side_action_timestamp,
+)
 
 
 def _action_eligible_and_skip(
@@ -156,3 +164,117 @@ def test_min_usd_threshold_boundary() -> None:
     )
     assert eligible
     assert skip is None
+
+
+# --- Cooldown tests ---
+
+
+def _cooldown_skip_reason(
+    trade_events_path: Path | None,
+    action: str,
+    runtime_mode: str,
+) -> str | None:
+    """Replicate cooldown check from quant_engine._run_one_cycle for testing."""
+    if trade_events_path is None or runtime_mode != "live" or action not in ("buy", "sell"):
+        return None
+    now_utc = datetime.now(timezone.utc)
+    last_ts = _last_same_side_action_timestamp(trade_events_path, action)
+    if last_ts is None:
+        return None
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.replace(tzinfo=timezone.utc)
+    elapsed = (now_utc - last_ts).total_seconds()
+    if elapsed < MIN_SECONDS_BETWEEN_SAME_SIDE_ACTIONS:
+        return "buy_cooldown_active" if action == "buy" else "sell_cooldown_active"
+    return None
+
+
+def test_live_buy_repeated_within_cooldown() -> None:
+    """live mode + repeated buy within cooldown => hold with buy_cooldown_active."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        path = Path(f.name)
+    try:
+        ts = (datetime.now(timezone.utc) - timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ev = {"timestamp": ts, "event_type": "buy_suppressed_low_usd", "pair": "XBTUSD", "side": "buy"}
+        path.write_text(json.dumps(ev) + "\n", encoding="utf-8")
+        skip = _cooldown_skip_reason(path, "buy", "live")
+        assert skip == "buy_cooldown_active"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_live_sell_repeated_within_cooldown() -> None:
+    """live mode + repeated sell within cooldown => hold with sell_cooldown_active."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        path = Path(f.name)
+    try:
+        ts = (datetime.now(timezone.utc) - timedelta(seconds=120)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ev = {"timestamp": ts, "event_type": "sell_suppressed_low_inventory", "pair": "XBTUSD", "side": "sell"}
+        path.write_text(json.dumps(ev) + "\n", encoding="utf-8")
+        skip = _cooldown_skip_reason(path, "sell", "live")
+        assert skip == "sell_cooldown_active"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_action_outside_cooldown_window() -> None:
+    """Action outside cooldown window => unchanged."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        path = Path(f.name)
+    try:
+        ts = (datetime.now(timezone.utc) - timedelta(seconds=400)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ev = {"timestamp": ts, "event_type": "buy_suppressed_low_usd", "pair": "XBTUSD", "side": "buy"}
+        path.write_text(json.dumps(ev) + "\n", encoding="utf-8")
+        skip = _cooldown_skip_reason(path, "buy", "live")
+        assert skip is None
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_paper_mode_cooldown_unchanged() -> None:
+    """paper / non-live mode => cooldown not applied."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        path = Path(f.name)
+    try:
+        ts = (datetime.now(timezone.utc) - timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ev = {"timestamp": ts, "event_type": "buy_suppressed_low_usd", "pair": "XBTUSD", "side": "buy"}
+        path.write_text(json.dumps(ev) + "\n", encoding="utf-8")
+        skip = _cooldown_skip_reason(path, "buy", "paper")
+        assert skip is None
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_hold_action_cooldown_unchanged() -> None:
+    """hold action => cooldown not applied."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        path = Path(f.name)
+    try:
+        ts = (datetime.now(timezone.utc) - timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ev = {"timestamp": ts, "event_type": "buy_suppressed_low_usd", "pair": "XBTUSD", "side": "buy"}
+        path.write_text(json.dumps(ev) + "\n", encoding="utf-8")
+        skip = _cooldown_skip_reason(path, "hold", "live")
+        assert skip is None
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_last_same_side_timestamp_returns_most_recent() -> None:
+    """_last_same_side_action_timestamp returns most recent matching event."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        path = Path(f.name)
+    try:
+        old_ts = (datetime.now(timezone.utc) - timedelta(seconds=600)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        new_ts = (datetime.now(timezone.utc) - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        path.write_text(
+            json.dumps({"timestamp": old_ts, "event_type": "buy_suppressed_low_usd", "side": "buy"}) + "\n"
+            + json.dumps({"timestamp": new_ts, "event_type": "buy_suppressed_low_usd", "side": "buy"}) + "\n",
+            encoding="utf-8",
+        )
+        last = _last_same_side_action_timestamp(path, "buy")
+        assert last is not None
+        last_utc = last if last.tzinfo else last.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - last_utc).total_seconds()
+        assert elapsed < 120  # newer event was 30s ago
+    finally:
+        path.unlink(missing_ok=True)

@@ -24,6 +24,7 @@ from strategy import maker_first_mean_reversion
 MAX_LIVE_ORDER_USD = 10
 MIN_USD_TO_BUY = 10.0
 MIN_XBT_TO_SELL = 0.0002
+MIN_SECONDS_BETWEEN_SAME_SIDE_ACTIONS = 300
 
 
 def _repo_root() -> Path:
@@ -80,6 +81,49 @@ def append_trade_event(path: Path, event: dict) -> None:
             f.write(line)
     except OSError as e:
         raise RuntimeError(f"Failed to append trade event to {path}: {e}") from e
+
+
+def _last_same_side_action_timestamp(path: Path, side: str) -> datetime.datetime | None:
+    """
+    Return timestamp of most recent same-side actionability event from trade_events.jsonl.
+    side: "buy" or "sell".
+    Events that count: live_order_submitted, forced_live_test_buy_submitted (buy),
+    buy_suppressed_low_usd (buy), sell_suppressed_low_inventory (sell).
+    """
+    if not path.exists():
+        return None
+    buy_events = ("live_order_submitted", "forced_live_test_buy_submitted", "buy_suppressed_low_usd")
+    sell_events = ("live_order_submitted", "sell_suppressed_low_inventory")
+    target = buy_events if side == "buy" else sell_events
+    last_ts: datetime.datetime | None = None
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                etype = ev.get("event_type", "")
+                if etype not in target:
+                    continue
+                if etype == "live_order_submitted" and ev.get("side") != side:
+                    continue
+                ts_str = ev.get("timestamp", "")
+                if not ts_str:
+                    continue
+                ts_str = ts_str.replace("Z", "+00:00")
+                try:
+                    ts = datetime.datetime.fromisoformat(ts_str)
+                except (ValueError, TypeError):
+                    continue
+                if last_ts is None or (ts > last_ts):
+                    last_ts = ts
+    except OSError:
+        return None
+    return last_ts
 
 
 def _kraken_reader_path() -> Path:
@@ -550,6 +594,7 @@ def _run_one_cycle(
     iteration: int,
     enable_live_orders: bool = False,
     live_account: dict | None = None,
+    trade_events_path: Path | None = None,
 ) -> dict:
     """Run one paper-trading cycle. Returns the result dict."""
     ticker = run_kraken_reader(["--format", "json", "ticker", "--pair", pair])
@@ -634,6 +679,17 @@ def _run_one_cycle(
             sell_eligible = broker.position_units > 0
             if action == "sell" and not sell_eligible:
                 skipped_reason = "no_inventory_to_sell"
+        if skipped_reason is None and runtime_mode == "live" and trade_events_path is not None:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            last_ts = _last_same_side_action_timestamp(trade_events_path, action)
+            if last_ts is not None:
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.replace(tzinfo=datetime.timezone.utc)
+                elapsed = (now_utc - last_ts).total_seconds()
+                if elapsed < MIN_SECONDS_BETWEEN_SAME_SIDE_ACTIONS:
+                    skipped_reason = (
+                        "buy_cooldown_active" if action == "buy" else "sell_cooldown_active"
+                    )
         if skipped_reason is None and not risk_result.get("allowed"):
             skipped_reason = "risk_blocked"
         elif skipped_reason is None and runtime_mode == "live" and not enable_live_orders:
@@ -1121,6 +1177,7 @@ def main() -> int:
                 iteration=i + 1,
                 enable_live_orders=enable_live_orders,
                 live_account=live_account,
+                trade_events_path=trade_events_path,
             )
             last_result = result
 
@@ -1430,6 +1487,34 @@ def main() -> int:
                         "iteration": i + 1,
                         "side": "buy",
                         "reason": "buy_suppressed_low_usd",
+                    },
+                )
+            if skip == "buy_cooldown_active":
+                append_trade_event(
+                    trade_events_path,
+                    {
+                        "timestamp": result.get("timestamp_utc", ""),
+                        "event_type": "buy_cooldown_active",
+                        "pair": pair,
+                        "runtime_mode": runtime_mode,
+                        "execution_mode": execution_mode,
+                        "iteration": i + 1,
+                        "side": "buy",
+                        "reason": "buy_cooldown_active",
+                    },
+                )
+            if skip == "sell_cooldown_active":
+                append_trade_event(
+                    trade_events_path,
+                    {
+                        "timestamp": result.get("timestamp_utc", ""),
+                        "event_type": "sell_cooldown_active",
+                        "pair": pair,
+                        "runtime_mode": runtime_mode,
+                        "execution_mode": execution_mode,
+                        "iteration": i + 1,
+                        "side": "sell",
+                        "reason": "sell_cooldown_active",
                     },
                 )
             if live_blocked:
