@@ -734,12 +734,25 @@ def _run_one_cycle(
 
     pnl = broker.pnl_summary(current_mid_price)
     timestamp_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    raw_signal = action
+    final_action = "hold" if (skipped_reason or live_mode_blocked) else action
+    if skipped_reason:
+        decision_reason = skipped_reason
+    elif live_mode_blocked:
+        decision_reason = "live_mode_blocked"
+    elif action in ("buy", "sell"):
+        decision_reason = f"signal_{action}"
+    else:
+        decision_reason = "hold"
     return {
         "timestamp_utc": timestamp_utc,
         "iteration": iteration,
         "pair": pair,
         "runtime_mode": runtime_mode,
         "execution_mode": execution_mode,
+        "raw_signal": raw_signal,
+        "final_action": final_action,
+        "decision_reason": decision_reason,
         "market": {
             "bid": best_bid,
             "ask": best_ask,
@@ -794,12 +807,21 @@ def _build_status(
     live_outcome = r.get("live_order_outcome")
     if forced_outcome:
         last_action = forced_outcome
+        raw_signal = r.get("raw_signal", "buy")
+        final_action = r.get("final_action", forced_outcome)
+        decision_reason = r.get("decision_reason", forced_outcome)
     elif live_outcome:
         last_action = live_outcome
+        raw_signal = r.get("raw_signal", strategy.get("action", "hold"))
+        final_action = r.get("final_action", live_outcome)
+        decision_reason = r.get("decision_reason", live_outcome)
     else:
         last_action = (
             "submitted" if order.get("submitted") else (order.get("skipped_reason") or "hold")
         )
+        raw_signal = r.get("raw_signal", strategy.get("action", "hold"))
+        final_action = r.get("final_action", last_action)
+        decision_reason = r.get("decision_reason", order.get("skipped_reason") or "hold")
     return {
         "timestamp": r.get("timestamp_utc")
         or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -810,6 +832,9 @@ def _build_status(
         "kill_switch_active": kill_switch_active,
         "last_signal": strategy.get("action", "hold"),
         "last_action": last_action,
+        "raw_signal": raw_signal,
+        "final_action": final_action,
+        "decision_reason": decision_reason,
         "last_mid_price": mid,
         "position_usd": position_usd,
         "realized_pnl": broker.get("realized_pnl_usd", 0.0),

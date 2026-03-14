@@ -127,8 +127,9 @@ def main() -> int:
         lines.append(f"pair:            {status.get('pair', '-')}")
         lines.append(f"runtime mode:    {status.get('runtime_mode', '-')}")
         lines.append(f"execution mode:  {status.get('execution_mode', '-')}")
-        lines.append(f"last action:     {status.get('last_action', '-')}")
-        lines.append(f"last signal:     {status.get('last_signal', '-')}")
+        lines.append(f"raw signal:      {status.get('raw_signal', status.get('last_signal', '-'))}")
+        lines.append(f"final action:    {status.get('final_action', status.get('last_action', '-'))}")
+        lines.append(f"decision reason: {status.get('decision_reason', '-')}")
         lines.append(f"kill switch:     {'ACTIVE' if status.get('kill_switch_active') else 'inactive'}")
         if status.get("shutdown_reason"):
             lines.append(f"shutdown reason: {status['shutdown_reason']}")
