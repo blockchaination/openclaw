@@ -47,6 +47,22 @@ def default_trade_events_path() -> Path:
     return _repo_root() / "logs" / "trade_events.jsonl"
 
 
+def default_signal_outcomes_path() -> Path:
+    """Return default signal outcomes path: <repo_root>/logs/signal_outcomes.jsonl."""
+    return _repo_root() / "logs" / "signal_outcomes.jsonl"
+
+
+def append_signal_outcome(path: Path, record: dict) -> None:
+    """Append one signal outcome record as JSONL line. Create parent dirs if needed."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(record, separators=(",", ":")) + "\n"
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError as e:
+        raise RuntimeError(f"Failed to append signal outcome to {path}: {e}") from e
+
+
 def append_jsonl(path: Path, row: dict) -> None:
     """
     Append one JSON object as a single line to a JSONL file.
@@ -517,6 +533,19 @@ def run_kraken_reader(command: list[str]) -> dict:
         raise RuntimeError(
             f"kraken_reader output is not valid JSON: {e}. stdout={result.stdout[:500]!r}"
         ) from e
+
+
+def _fetch_mid_price(pair: str) -> float | None:
+    """Fetch current mid price from ticker. Returns None on failure."""
+    try:
+        ticker = run_kraken_reader(["--format", "json", "ticker", "--pair", pair])
+        bid = _safe_float(ticker.get("bid", 0))
+        ask = _safe_float(ticker.get("ask", 0))
+        if bid <= 0 or ask <= 0:
+            return None
+        return (bid + ask) / 2.0
+    except (RuntimeError, Exception):
+        return None
 
 
 def _safe_float(val: object, default: float = 0.0) -> float:
@@ -1020,9 +1049,11 @@ def main() -> int:
         if args.trade_events_file is None
         else Path(args.trade_events_file)
     )
+    signal_outcomes_path = default_signal_outcomes_path()
 
     status_path.parent.mkdir(parents=True, exist_ok=True)
     trade_events_path.parent.mkdir(parents=True, exist_ok=True)
+    signal_outcomes_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.check_kraken_auth:
         _run_kraken_auth_check(
@@ -1148,6 +1179,9 @@ def main() -> int:
         },
     )
 
+    pending_signal_outcomes: list[dict] = []
+    SIGNAL_OUTCOME_DELTAS = (30, 60, 300)
+
     try:
         for i in range(iterations):
             if kill_switch_path.exists():
@@ -1184,6 +1218,31 @@ def main() -> int:
                     },
                 )
                 break
+
+            # Best-effort: process one pending signal outcome per iteration (non-blocking)
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            for idx, pending in enumerate(pending_signal_outcomes):
+                signal_time = pending.get("_signal_time")
+                if signal_time is None:
+                    continue
+                if signal_time.tzinfo is None:
+                    signal_time = signal_time.replace(tzinfo=datetime.timezone.utc)
+                elapsed = (now_utc - signal_time).total_seconds()
+                updated = False
+                for delta in SIGNAL_OUTCOME_DELTAS:
+                    key = f"price_after_{delta}s"
+                    if elapsed >= delta and pending.get(key) is None:
+                        mid = _fetch_mid_price(pending["pair"])
+                        if mid is not None:
+                            pending[key] = round(mid, 2)
+                            updated = True
+                        break
+                if updated:
+                    if all(pending.get(f"price_after_{d}s") is not None for d in SIGNAL_OUTCOME_DELTAS):
+                        record = {k: v for k, v in pending.items() if not k.startswith("_")}
+                        append_signal_outcome(signal_outcomes_path, record)
+                        pending_signal_outcomes.pop(idx)
+                    break
 
             if iterations > 1:
                 print(f"--- iteration {i + 1}/{iterations} ---", file=sys.stderr)
@@ -1459,10 +1518,12 @@ def main() -> int:
                         result["live_order_error"] = err_msg
 
             if action in ("buy", "sell"):
+                ts_str = result.get("timestamp_utc", "")
+                price_at_signal = _safe_float(result.get("market", {}).get("mid_price"))
                 append_trade_event(
                     trade_events_path,
                     {
-                        "timestamp": result.get("timestamp_utc", ""),
+                        "timestamp": ts_str,
                         "event_type": "signal_generated",
                         "pair": pair,
                         "runtime_mode": runtime_mode,
@@ -1472,6 +1533,24 @@ def main() -> int:
                         "reason": result.get("strategy", {}).get("reason", ""),
                     },
                 )
+                if price_at_signal > 0:
+                    signal_record = {
+                        "timestamp": ts_str,
+                        "pair": pair,
+                        "signal": action,
+                        "price_at_signal": round(price_at_signal, 2),
+                    }
+                    append_signal_outcome(signal_outcomes_path, signal_record)
+                    ts_parsed = ts_str.replace("Z", "+00:00")
+                    try:
+                        signal_time = datetime.datetime.fromisoformat(ts_parsed)
+                    except (ValueError, TypeError):
+                        signal_time = None
+                    if signal_time is not None:
+                        pending_signal_outcomes.append({
+                            **signal_record,
+                            "_signal_time": signal_time,
+                        })
             if skip == "risk_blocked":
                 append_trade_event(
                     trade_events_path,
