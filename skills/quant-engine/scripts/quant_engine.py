@@ -22,6 +22,7 @@ from risk import allow_trade
 from strategy import maker_first_mean_reversion
 
 MAX_LIVE_ORDER_USD = 10
+MIN_USD_TO_BUY = 10.0
 MIN_XBT_TO_SELL = 0.0002
 
 
@@ -621,9 +622,13 @@ def _run_one_cycle(
 
     if action in ("buy", "sell"):
         if runtime_mode == "live" and live_account is not None:
+            usd = live_account.get("usd", 0) or 0
             xbt = live_account.get("xbt", 0) or 0
+            buy_eligible = usd >= MIN_USD_TO_BUY
             sell_eligible = xbt >= MIN_XBT_TO_SELL
-            if action == "sell" and not sell_eligible:
+            if action == "buy" and not buy_eligible:
+                skipped_reason = "buy_suppressed_low_usd"
+            elif action == "sell" and not sell_eligible:
                 skipped_reason = "sell_suppressed_low_inventory"
         else:
             sell_eligible = broker.position_units > 0
@@ -1411,6 +1416,20 @@ def main() -> int:
                         "iteration": i + 1,
                         "side": "sell",
                         "reason": "sell_suppressed_low_inventory",
+                    },
+                )
+            if skip == "buy_suppressed_low_usd":
+                append_trade_event(
+                    trade_events_path,
+                    {
+                        "timestamp": result.get("timestamp_utc", ""),
+                        "event_type": "buy_suppressed_low_usd",
+                        "pair": pair,
+                        "runtime_mode": runtime_mode,
+                        "execution_mode": execution_mode,
+                        "iteration": i + 1,
+                        "side": "buy",
+                        "reason": "buy_suppressed_low_usd",
                     },
                 )
             if live_blocked:
