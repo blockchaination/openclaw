@@ -1,5 +1,7 @@
 """Strategy logic."""
 
+MIN_SIGNAL_STRENGTH = 1.5
+
 
 def maker_first_mean_reversion(
     mid_price: float,
@@ -26,6 +28,7 @@ def maker_first_mean_reversion(
         return {
             "action": "hold",
             "reason": "invalid mid_price or spread",
+            "signal_strength": 0.0,
             "inputs": {
                 "mid_price": mid_price,
                 "spread": spread,
@@ -41,6 +44,7 @@ def maker_first_mean_reversion(
         return {
             "action": "hold",
             "reason": "volatility < 0",
+            "signal_strength": 0.0,
             "inputs": {
                 "mid_price": mid_price,
                 "spread": spread,
@@ -53,11 +57,30 @@ def maker_first_mean_reversion(
         }
 
     momentum_threshold = max(volatility * 0.15, 0.5)
+    signal_strength = (
+        -momentum / momentum_threshold if momentum_threshold > 0 else 0.0
+    )
 
     if momentum < -momentum_threshold and book_imbalance > 0.02:
+        if abs(signal_strength) < MIN_SIGNAL_STRENGTH:
+            return {
+                "action": "hold",
+                "reason": "weak_signal_filtered",
+                "signal_strength": signal_strength,
+                "inputs": {
+                    "mid_price": mid_price,
+                    "spread": spread,
+                    "book_imbalance": book_imbalance,
+                    "momentum": momentum,
+                    "volatility": volatility,
+                    "momentum_threshold": momentum_threshold,
+                },
+                "maker_hint": {"post_only": True, "preferred_side": "none"},
+            }
         return {
             "action": "buy",
             "reason": "buy mean-reversion signal",
+            "signal_strength": signal_strength,
             "inputs": {
                 "mid_price": mid_price,
                 "spread": spread,
@@ -70,9 +93,25 @@ def maker_first_mean_reversion(
         }
 
     if momentum > momentum_threshold and book_imbalance < -0.02:
+        if abs(signal_strength) < MIN_SIGNAL_STRENGTH:
+            return {
+                "action": "hold",
+                "reason": "weak_signal_filtered",
+                "signal_strength": signal_strength,
+                "inputs": {
+                    "mid_price": mid_price,
+                    "spread": spread,
+                    "book_imbalance": book_imbalance,
+                    "momentum": momentum,
+                    "volatility": volatility,
+                    "momentum_threshold": momentum_threshold,
+                },
+                "maker_hint": {"post_only": True, "preferred_side": "none"},
+            }
         return {
             "action": "sell",
             "reason": "sell mean-reversion signal",
+            "signal_strength": signal_strength,
             "inputs": {
                 "mid_price": mid_price,
                 "spread": spread,
@@ -87,6 +126,7 @@ def maker_first_mean_reversion(
     return {
         "action": "hold",
         "reason": "no mean-reversion signal",
+        "signal_strength": signal_strength,
         "inputs": {
             "mid_price": mid_price,
             "spread": spread,

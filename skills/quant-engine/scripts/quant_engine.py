@@ -772,7 +772,8 @@ def _run_one_cycle(
     elif action in ("buy", "sell"):
         decision_reason = f"signal_{action}"
     else:
-        decision_reason = "hold"
+        decision_reason = decision.get("reason", "hold")
+    signal_strength = decision.get("signal_strength")
     return {
         "timestamp_utc": timestamp_utc,
         "iteration": iteration,
@@ -782,6 +783,7 @@ def _run_one_cycle(
         "raw_signal": raw_signal,
         "final_action": final_action,
         "decision_reason": decision_reason,
+        "signal_strength": signal_strength,
         "market": {
             "bid": best_bid,
             "ask": best_ask,
@@ -864,6 +866,7 @@ def _build_status(
         "raw_signal": raw_signal,
         "final_action": final_action,
         "decision_reason": decision_reason,
+        "signal_strength": r.get("signal_strength"),
         "last_mid_price": mid,
         "position_usd": position_usd,
         "realized_pnl": broker.get("realized_pnl_usd", 0.0),
@@ -1517,6 +1520,20 @@ def main() -> int:
                         result["live_order_outcome"] = "live_failed"
                         result["live_order_error"] = err_msg
 
+            if result.get("decision_reason") == "weak_signal_filtered":
+                append_trade_event(
+                    trade_events_path,
+                    {
+                        "timestamp": result.get("timestamp_utc", ""),
+                        "event_type": "weak_signal_filtered",
+                        "pair": pair,
+                        "runtime_mode": runtime_mode,
+                        "execution_mode": execution_mode,
+                        "iteration": i + 1,
+                        "reason": "weak_signal_filtered",
+                        "signal_strength": result.get("signal_strength"),
+                    },
+                )
             if action in ("buy", "sell"):
                 ts_str = result.get("timestamp_utc", "")
                 price_at_signal = _safe_float(result.get("market", {}).get("mid_price"))

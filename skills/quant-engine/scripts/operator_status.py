@@ -80,6 +80,9 @@ def _format_event(ev: dict) -> str:
         parts.append(f"iter={ev.get('iteration','?')} reason={ev.get('reason','') or '-'}")
     elif etype == "kill_switch_triggered":
         parts.append(f"reason={ev.get('reason','')}")
+    elif etype == "weak_signal_filtered":
+        ss = ev.get("signal_strength")
+        parts.append(f"signal_strength={ss if ss is not None else '?'}")
     elif "reason" in ev:
         parts.append(f"reason={ev.get('reason','')}")
     return " | ".join(parts)
@@ -130,6 +133,8 @@ def main() -> int:
         lines.append(f"raw signal:      {status.get('raw_signal', status.get('last_signal', '-'))}")
         lines.append(f"final action:    {status.get('final_action', status.get('last_action', '-'))}")
         lines.append(f"decision reason: {status.get('decision_reason', '-')}")
+        ss = status.get("signal_strength")
+        lines.append(f"signal strength: {ss if ss is not None else '-'}")
         lines.append(f"kill switch:     {'ACTIVE' if status.get('kill_switch_active') else 'inactive'}")
         if status.get("shutdown_reason"):
             lines.append(f"shutdown reason: {status['shutdown_reason']}")
