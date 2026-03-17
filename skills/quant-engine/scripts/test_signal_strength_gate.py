@@ -19,8 +19,39 @@ from quant_engine import _build_status
 
 
 def test_strong_buy_signal_passes_through() -> None:
-    """Strong buy signal (abs(signal_strength) >= 1.5) passes through as buy."""
-    # momentum=-2.0, momentum_threshold=1.0 => signal_strength=2.0 (volatility=20/3)
+    """Strong buy signal (abs(signal_strength) >= 3.0) passes through as buy."""
+    # momentum=-3.0, momentum_threshold=1.0 => signal_strength=3.0
+    decision = maker_first_mean_reversion(
+        mid_price=50000.0,
+        spread=10.0,
+        book_imbalance=0.05,
+        momentum=-3.0,
+        volatility=20.0 / 3.0,
+    )
+    assert decision["action"] == "buy"
+    assert decision["signal_strength"] == 3.0
+    assert abs(decision["signal_strength"]) >= MIN_SIGNAL_STRENGTH
+
+
+def test_strong_sell_signal_passes_through() -> None:
+    """Strong sell signal (abs(signal_strength) >= 3.0) passes through as sell."""
+    # momentum=3.0, momentum_threshold=1.0 => signal_strength=-3.0
+    decision = maker_first_mean_reversion(
+        mid_price=50000.0,
+        spread=10.0,
+        book_imbalance=-0.05,
+        momentum=3.0,
+        volatility=20.0 / 3.0,
+    )
+    assert decision["action"] == "sell"
+    assert decision["signal_strength"] == -3.0
+    assert abs(decision["signal_strength"]) >= MIN_SIGNAL_STRENGTH
+
+
+def test_weak_buy_candidate_becomes_hold() -> None:
+    """Weak buy candidate (abs(signal_strength) < 3.0) becomes hold."""
+    # momentum=-2.0 < -1.0 (threshold), book_imbalance>0.02 => buy branch
+    # signal_strength=2.0 < 3.0 => filtered to hold
     decision = maker_first_mean_reversion(
         mid_price=50000.0,
         spread=10.0,
@@ -28,14 +59,16 @@ def test_strong_buy_signal_passes_through() -> None:
         momentum=-2.0,
         volatility=20.0 / 3.0,
     )
-    assert decision["action"] == "buy"
+    assert decision["action"] == "hold"
+    assert decision["reason"] == "weak_signal_filtered"
     assert decision["signal_strength"] == 2.0
-    assert abs(decision["signal_strength"]) >= MIN_SIGNAL_STRENGTH
+    assert abs(decision["signal_strength"]) < MIN_SIGNAL_STRENGTH
 
 
-def test_strong_sell_signal_passes_through() -> None:
-    """Strong sell signal (abs(signal_strength) >= 1.5) passes through as sell."""
-    # momentum=2.0, momentum_threshold=1.0 => signal_strength=-2.0
+def test_weak_sell_candidate_becomes_hold() -> None:
+    """Weak sell candidate (abs(signal_strength) < 3.0) becomes hold."""
+    # momentum=2.0 > 1.0 (threshold), book_imbalance<-0.02 => sell branch
+    # signal_strength=-2.0, abs=2.0 < 3.0 => filtered to hold
     decision = maker_first_mean_reversion(
         mid_price=50000.0,
         spread=10.0,
@@ -43,42 +76,9 @@ def test_strong_sell_signal_passes_through() -> None:
         momentum=2.0,
         volatility=20.0 / 3.0,
     )
-    assert decision["action"] == "sell"
+    assert decision["action"] == "hold"
+    assert decision["reason"] == "weak_signal_filtered"
     assert decision["signal_strength"] == -2.0
-    assert abs(decision["signal_strength"]) >= MIN_SIGNAL_STRENGTH
-
-
-def test_weak_buy_candidate_becomes_hold() -> None:
-    """Weak buy candidate (abs(signal_strength) < 1.5) becomes hold."""
-    # momentum=-1.2 < -1.0 (threshold), book_imbalance>0.02 => buy branch
-    # signal_strength=1.2 < 1.5 => filtered to hold
-    decision = maker_first_mean_reversion(
-        mid_price=50000.0,
-        spread=10.0,
-        book_imbalance=0.05,
-        momentum=-1.2,
-        volatility=20.0 / 3.0,
-    )
-    assert decision["action"] == "hold"
-    assert decision["reason"] == "weak_signal_filtered"
-    assert decision["signal_strength"] == 1.2
-    assert abs(decision["signal_strength"]) < MIN_SIGNAL_STRENGTH
-
-
-def test_weak_sell_candidate_becomes_hold() -> None:
-    """Weak sell candidate (abs(signal_strength) < 1.5) becomes hold."""
-    # momentum=1.2 > 1.0 (threshold), book_imbalance<-0.02 => sell branch
-    # signal_strength=-1.2, abs=1.2 < 1.5 => filtered to hold
-    decision = maker_first_mean_reversion(
-        mid_price=50000.0,
-        spread=10.0,
-        book_imbalance=-0.05,
-        momentum=1.2,
-        volatility=20.0 / 3.0,
-    )
-    assert decision["action"] == "hold"
-    assert decision["reason"] == "weak_signal_filtered"
-    assert decision["signal_strength"] == -1.2
     assert abs(decision["signal_strength"]) < MIN_SIGNAL_STRENGTH
 
 
@@ -103,14 +103,14 @@ def test_signal_strength_present_when_filtered() -> None:
         "strategy": {
             "action": "hold",
             "reason": "weak_signal_filtered",
-            "signal_strength": 1.2,
+            "signal_strength": 2.0,
         },
         "order": {"submitted": False, "skipped_reason": None},
         "raw_signal": "hold",
         "final_action": "hold",
         "decision_reason": "weak_signal_filtered",
-        "signal_strength": 1.2,
+        "signal_strength": 2.0,
     }
     status = _build_status(result, False, None, None, pair_fallback="XBTUSD")
-    assert status["signal_strength"] == 1.2
+    assert status["signal_strength"] == 2.0
     assert status["decision_reason"] == "weak_signal_filtered"

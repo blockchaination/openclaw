@@ -1,6 +1,6 @@
 """Strategy logic."""
 
-MIN_SIGNAL_STRENGTH = 1.5
+MIN_SIGNAL_STRENGTH = 3.0
 
 
 def maker_first_mean_reversion(
