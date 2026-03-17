@@ -613,6 +613,13 @@ def _extract_prices_from_trades(trades_data: object, last_price: float) -> list[
     return prices
 
 
+def _resolve_signal_strength(decision: dict) -> int | float | None:
+    """Enforce signal_strength contract: None for non-directional hold, else pass through."""
+    if decision.get("action") == "hold" and decision.get("reason") != "weak_signal_filtered":
+        return None
+    return decision.get("signal_strength")
+
+
 def _run_one_cycle(
     pair: str,
     usd_order_size: float,
@@ -773,13 +780,7 @@ def _run_one_cycle(
         decision_reason = f"signal_{action}"
     else:
         decision_reason = decision.get("reason", "hold")
-    signal_strength = decision.get("signal_strength")
-    if decision_reason in (
-        "no mean-reversion signal",
-        "invalid mid_price or spread",
-        "volatility < 0",
-    ):
-        signal_strength = None
+    signal_strength = _resolve_signal_strength(decision)
     return {
         "timestamp_utc": timestamp_utc,
         "iteration": iteration,
@@ -872,12 +873,7 @@ def _build_status(
         "raw_signal": raw_signal,
         "final_action": final_action,
         "decision_reason": decision_reason,
-        "signal_strength": (
-            None
-            if decision_reason
-            in ("no mean-reversion signal", "invalid mid_price or spread", "volatility < 0")
-            else r.get("signal_strength")
-        ),
+        "signal_strength": r.get("signal_strength"),
         "last_mid_price": mid,
         "position_usd": position_usd,
         "realized_pnl": broker.get("realized_pnl_usd", 0.0),

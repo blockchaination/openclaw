@@ -63,10 +63,10 @@ def _read_jsonl_tail(path: Path, n: int) -> list[dict]:
 
 
 def _format_signal_strength(ss: int | float | None) -> str:
-    """Format signal_strength for display: None -> '-', -0.0/0.0 -> '0.0'."""
+    """Format signal_strength for display: None -> '-', normalize -0.0 to 0.0."""
     if ss is None:
         return "-"
-    if isinstance(ss, (int, float)) and ss == 0:
+    if isinstance(ss, (int, float)) and abs(ss) < 1e-9:
         return "0.0"
     return str(ss)
 

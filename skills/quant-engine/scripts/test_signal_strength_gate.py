@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Tests for minimum signal-strength gate in quant engine.
+Tests for signal_strength contract enforcement in quant engine.
 
 Run: python -m pytest test_signal_strength_gate.py -v
 """
@@ -15,8 +15,63 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from strategy import maker_first_mean_reversion, MIN_SIGNAL_STRENGTH
-from quant_engine import _build_status
+from quant_engine import _build_status, _resolve_signal_strength
 from operator_status import _format_signal_strength
+
+
+def test_no_mean_reversion_signal_strength_none_in_result_and_status() -> None:
+    """No mean-reversion signal -> signal_strength is None (in result AND status)."""
+    decision = {"action": "hold", "reason": "no mean-reversion signal", "signal_strength": -0.0}
+    assert _resolve_signal_strength(decision) is None
+    result = {
+        "strategy": decision,
+        "order": {},
+        "raw_signal": "hold",
+        "final_action": "hold",
+        "decision_reason": "no mean-reversion signal",
+        "signal_strength": _resolve_signal_strength(decision),
+    }
+    status = _build_status(result, False, None, None, pair_fallback="XBTUSD")
+    assert status["signal_strength"] is None
+
+
+def test_weak_signal_filtered_retains_numeric() -> None:
+    """weak_signal_filtered -> retains numeric value."""
+    decision = {"action": "hold", "reason": "weak_signal_filtered", "signal_strength": 2.0}
+    assert _resolve_signal_strength(decision) == 2.0
+    result = {
+        "strategy": decision,
+        "order": {},
+        "raw_signal": "hold",
+        "final_action": "hold",
+        "decision_reason": "weak_signal_filtered",
+        "signal_strength": 2.0,
+    }
+    status = _build_status(result, False, None, None, pair_fallback="XBTUSD")
+    assert status["signal_strength"] == 2.0
+
+
+def test_strong_buy_retains_numeric() -> None:
+    """Strong buy -> retains numeric value."""
+    decision = {"action": "buy", "reason": "buy mean-reversion signal", "signal_strength": 3.0}
+    assert _resolve_signal_strength(decision) == 3.0
+
+
+def test_strong_sell_retains_numeric() -> None:
+    """Strong sell -> retains numeric value."""
+    decision = {"action": "sell", "reason": "sell mean-reversion signal", "signal_strength": -3.0}
+    assert _resolve_signal_strength(decision) == -3.0
+
+
+def test_operator_prints_dash_for_none() -> None:
+    """operator_status prints '-' for None."""
+    assert _format_signal_strength(None) == "-"
+
+
+def test_operator_never_prints_negative_zero() -> None:
+    """operator_status NEVER prints '-0.0'."""
+    assert _format_signal_strength(-0.0) == "0.0"
+    assert "-0.0" not in _format_signal_strength(-0.0)
 
 
 def test_strong_buy_signal_passes_through() -> None:
@@ -125,73 +180,3 @@ def test_volatility_negative_produces_none() -> None:
     assert decision["signal_strength"] is None
 
 
-def test_signal_strength_none_in_status_shows_dash() -> None:
-    """Status with signal_strength=None: key present, value None (operator shows '-')."""
-    result = {
-        "strategy": {"action": "hold", "signal_strength": None},
-        "order": {"submitted": False, "skipped_reason": None},
-        "raw_signal": "hold",
-        "final_action": "hold",
-        "decision_reason": "no mean-reversion signal",
-        "signal_strength": None,
-    }
-    status = _build_status(result, False, None, None, pair_fallback="XBTUSD")
-    assert "signal_strength" in status
-    assert status["signal_strength"] is None
-
-
-def test_signal_strength_present_when_filtered() -> None:
-    """signal_strength present in status when weak signal filtered."""
-    result = {
-        "strategy": {
-            "action": "hold",
-            "reason": "weak_signal_filtered",
-            "signal_strength": 2.0,
-        },
-        "order": {"submitted": False, "skipped_reason": None},
-        "raw_signal": "hold",
-        "final_action": "hold",
-        "decision_reason": "weak_signal_filtered",
-        "signal_strength": 2.0,
-    }
-    status = _build_status(result, False, None, None, pair_fallback="XBTUSD")
-    assert status["signal_strength"] == 2.0
-    assert status["decision_reason"] == "weak_signal_filtered"
-
-
-def test_no_mean_reversion_runtime_status_signal_strength_none() -> None:
-    """No mean-reversion signal -> runtime/status signal_strength is None (even with stale -0.0)."""
-    result = {
-        "strategy": {"action": "hold", "reason": "no mean-reversion signal", "signal_strength": None},
-        "order": {"submitted": False, "skipped_reason": None},
-        "raw_signal": "hold",
-        "final_action": "hold",
-        "decision_reason": "no mean-reversion signal",
-        "signal_strength": -0.0,
-    }
-    status = _build_status(result, False, None, None, pair_fallback="XBTUSD")
-    assert status["signal_strength"] is None
-
-
-def test_invalid_input_runtime_status_signal_strength_none() -> None:
-    """Invalid input -> runtime/status signal_strength is None."""
-    result = {
-        "strategy": {"action": "hold", "reason": "invalid mid_price or spread", "signal_strength": None},
-        "order": {"submitted": False, "skipped_reason": None},
-        "raw_signal": "hold",
-        "final_action": "hold",
-        "decision_reason": "invalid mid_price or spread",
-        "signal_strength": 0.0,
-    }
-    status = _build_status(result, False, None, None, pair_fallback="XBTUSD")
-    assert status["signal_strength"] is None
-
-
-def test_operator_format_signal_strength_none_shows_dash() -> None:
-    """Operator formatting: None -> '-'."""
-    assert _format_signal_strength(None) == "-"
-
-
-def test_operator_format_signal_strength_negative_zero_shows_zero() -> None:
-    """Operator formatting: -0.0 -> '0.0' (never '-0.0')."""
-    assert _format_signal_strength(-0.0) == "0.0"
