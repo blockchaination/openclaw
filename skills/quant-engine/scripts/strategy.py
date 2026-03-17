@@ -28,7 +28,7 @@ def maker_first_mean_reversion(
         return {
             "action": "hold",
             "reason": "invalid mid_price or spread",
-            "signal_strength": 0.0,
+            "signal_strength": None,
             "inputs": {
                 "mid_price": mid_price,
                 "spread": spread,
@@ -44,7 +44,7 @@ def maker_first_mean_reversion(
         return {
             "action": "hold",
             "reason": "volatility < 0",
-            "signal_strength": 0.0,
+            "signal_strength": None,
             "inputs": {
                 "mid_price": mid_price,
                 "spread": spread,
@@ -126,7 +126,7 @@ def maker_first_mean_reversion(
     return {
         "action": "hold",
         "reason": "no mean-reversion signal",
-        "signal_strength": signal_strength,
+        "signal_strength": None,
         "inputs": {
             "mid_price": mid_price,
             "spread": spread,

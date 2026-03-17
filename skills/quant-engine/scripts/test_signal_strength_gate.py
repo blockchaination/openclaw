@@ -82,19 +82,61 @@ def test_weak_sell_candidate_becomes_hold() -> None:
     assert abs(decision["signal_strength"]) < MIN_SIGNAL_STRENGTH
 
 
-def test_signal_strength_present_in_result_status_shape() -> None:
-    """signal_strength is present in result/status shape."""
+def test_no_mean_reversion_signal_produces_none() -> None:
+    """No mean-reversion signal -> signal_strength is None."""
+    decision = maker_first_mean_reversion(
+        mid_price=50000.0,
+        spread=10.0,
+        book_imbalance=0.01,
+        momentum=0.0,
+        volatility=5.0,
+    )
+    assert decision["action"] == "hold"
+    assert decision["reason"] == "no mean-reversion signal"
+    assert decision["signal_strength"] is None
+
+
+def test_invalid_input_produces_none() -> None:
+    """Invalid mid_price or spread -> signal_strength is None."""
+    decision = maker_first_mean_reversion(
+        mid_price=0.0,
+        spread=10.0,
+        book_imbalance=0.05,
+        momentum=-2.0,
+        volatility=5.0,
+    )
+    assert decision["action"] == "hold"
+    assert decision["reason"] == "invalid mid_price or spread"
+    assert decision["signal_strength"] is None
+
+
+def test_volatility_negative_produces_none() -> None:
+    """Volatility < 0 -> signal_strength is None."""
+    decision = maker_first_mean_reversion(
+        mid_price=50000.0,
+        spread=10.0,
+        book_imbalance=0.05,
+        momentum=-2.0,
+        volatility=-0.5,
+    )
+    assert decision["action"] == "hold"
+    assert decision["reason"] == "volatility < 0"
+    assert decision["signal_strength"] is None
+
+
+def test_signal_strength_none_in_status_shows_dash() -> None:
+    """Status with signal_strength=None: key present, value None (operator shows '-')."""
     result = {
-        "strategy": {"action": "hold", "signal_strength": 0.5},
+        "strategy": {"action": "hold", "signal_strength": None},
         "order": {"submitted": False, "skipped_reason": None},
         "raw_signal": "hold",
         "final_action": "hold",
         "decision_reason": "no mean-reversion signal",
-        "signal_strength": 0.5,
+        "signal_strength": None,
     }
     status = _build_status(result, False, None, None, pair_fallback="XBTUSD")
     assert "signal_strength" in status
-    assert status["signal_strength"] == 0.5
+    assert status["signal_strength"] is None
 
 
 def test_signal_strength_present_when_filtered() -> None:
