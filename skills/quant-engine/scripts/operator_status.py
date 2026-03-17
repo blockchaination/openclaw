@@ -62,6 +62,15 @@ def _read_jsonl_tail(path: Path, n: int) -> list[dict]:
     return out
 
 
+def _format_signal_strength(ss: int | float | None) -> str:
+    """Format signal_strength for display: None -> '-', -0.0/0.0 -> '0.0'."""
+    if ss is None:
+        return "-"
+    if isinstance(ss, (int, float)) and ss == 0:
+        return "0.0"
+    return str(ss)
+
+
 def _format_event(ev: dict) -> str:
     """Format a single trade event for display."""
     ts = ev.get("timestamp", "")
@@ -81,8 +90,7 @@ def _format_event(ev: dict) -> str:
     elif etype == "kill_switch_triggered":
         parts.append(f"reason={ev.get('reason','')}")
     elif etype == "weak_signal_filtered":
-        ss = ev.get("signal_strength")
-        parts.append(f"signal_strength={ss if ss is not None else '?'}")
+        parts.append(f"signal_strength={_format_signal_strength(ev.get('signal_strength'))}")
     elif "reason" in ev:
         parts.append(f"reason={ev.get('reason','')}")
     return " | ".join(parts)
@@ -133,8 +141,8 @@ def main() -> int:
         lines.append(f"raw signal:      {status.get('raw_signal', status.get('last_signal', '-'))}")
         lines.append(f"final action:    {status.get('final_action', status.get('last_action', '-'))}")
         lines.append(f"decision reason: {status.get('decision_reason', '-')}")
-        ss = status.get("signal_strength")
-        lines.append(f"signal strength: {ss if ss is not None else '-'}")
+        ss_str = _format_signal_strength(status.get("signal_strength"))
+        lines.append(f"signal strength: {ss_str}")
         lines.append(f"kill switch:     {'ACTIVE' if status.get('kill_switch_active') else 'inactive'}")
         if status.get("shutdown_reason"):
             lines.append(f"shutdown reason: {status['shutdown_reason']}")

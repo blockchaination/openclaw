@@ -774,6 +774,12 @@ def _run_one_cycle(
     else:
         decision_reason = decision.get("reason", "hold")
     signal_strength = decision.get("signal_strength")
+    if decision_reason in (
+        "no mean-reversion signal",
+        "invalid mid_price or spread",
+        "volatility < 0",
+    ):
+        signal_strength = None
     return {
         "timestamp_utc": timestamp_utc,
         "iteration": iteration,
@@ -866,7 +872,12 @@ def _build_status(
         "raw_signal": raw_signal,
         "final_action": final_action,
         "decision_reason": decision_reason,
-        "signal_strength": r.get("signal_strength"),
+        "signal_strength": (
+            None
+            if decision_reason
+            in ("no mean-reversion signal", "invalid mid_price or spread", "volatility < 0")
+            else r.get("signal_strength")
+        ),
         "last_mid_price": mid,
         "position_usd": position_usd,
         "realized_pnl": broker.get("realized_pnl_usd", 0.0),
