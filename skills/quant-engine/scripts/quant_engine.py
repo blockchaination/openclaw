@@ -32,6 +32,16 @@ from risk import allow_trade
 from shadow_model import load_model as load_shadow_model
 from shadow_model import score_candidate as shadow_score_candidate
 from strategy import maker_first_mean_reversion
+from telegram_notifier import (
+    format_help_reply,
+    format_kill_switch_activated,
+    format_kill_switch_deactivated,
+    format_status_reply,
+    get_telegram_updates,
+    parse_telegram_command,
+    send_alert_for_event,
+    send_telegram_message,
+)
 
 MAX_LIVE_ORDER_USD = 10
 MIN_USD_TO_BUY = 10.0
@@ -661,6 +671,56 @@ def _apply_shadow_inference(
     append_jsonl(shadow_path, row)
 
 
+def _process_telegram_commands(
+    status_path: Path,
+    kill_switch_path: Path,
+    pair: str,
+    last_offset: int,
+) -> int:
+    """
+    Poll Telegram for commands, handle /status, /stop, /start, /help.
+    Returns next offset for getUpdates.
+    """
+    updates = get_telegram_updates(offset=last_offset)
+    next_offset = last_offset
+    for upd in updates:
+        next_offset = max(next_offset, upd.get("update_id", 0) + 1)
+        cmd = parse_telegram_command(upd)
+        if cmd == "/help":
+            send_telegram_message(format_help_reply())
+        elif cmd == "/status":
+            status = _read_json_safe(status_path)
+            if status:
+                send_telegram_message(format_status_reply(status))
+            else:
+                send_telegram_message(f"OpenClaw Status\npair: {pair}\n(no status file)")
+        elif cmd == "/stop":
+            try:
+                kill_switch_path.touch()
+                send_telegram_message(format_kill_switch_activated(pair))
+            except OSError:
+                send_telegram_message(f"OpenClaw: failed to activate kill switch for {pair}")
+        elif cmd == "/start":
+            try:
+                if kill_switch_path.exists():
+                    kill_switch_path.unlink()
+                send_telegram_message(format_kill_switch_deactivated(pair))
+            except OSError:
+                send_telegram_message(f"OpenClaw: failed to deactivate kill switch for {pair}")
+    return next_offset
+
+
+def _read_json_safe(path: Path) -> dict | None:
+    """Read JSON file. Return None if missing or invalid."""
+    if not path.exists():
+        return None
+    try:
+        with path.open(encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def _compute_training_labels(
     price_at_signal: float,
     candidate_side: str,
@@ -1274,51 +1334,58 @@ def main() -> int:
             "reason": reason,
         }
         if err:
-            append_trade_event(
-                trade_events_path,
-                {**base, "event_type": "engine_error", "error": err},
-            )
-        append_trade_event(
-            trade_events_path,
-            {**base, "event_type": "engine_stopped", "error": err if err else None},
-        )
+            ev_err = {**base, "event_type": "engine_error", "error": err}
+            append_trade_event(trade_events_path, ev_err)
+            send_alert_for_event(ev_err)
+        ev_stopped = {**base, "event_type": "engine_stopped", "error": err if err else None}
+        append_trade_event(trade_events_path, ev_stopped)
+        send_alert_for_event(ev_stopped)
 
-    append_trade_event(
-        trade_events_path,
-        {
-            "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            ),
-            "event_type": "engine_started",
-            "pair": pair,
-            "runtime_mode": runtime_mode,
-            "execution_mode": execution_mode,
-            "iterations": iterations,
-        },
-    )
+    ev_started = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "event_type": "engine_started",
+        "pair": pair,
+        "runtime_mode": runtime_mode,
+        "execution_mode": execution_mode,
+        "iterations": iterations,
+    }
+    append_trade_event(trade_events_path, ev_started)
+    send_alert_for_event(ev_started)
 
     pending_signal_outcomes: list[dict] = []
     pending_training_examples: list[dict] = []
     SIGNAL_OUTCOME_DELTAS = (30, 60, 300)
+    telegram_offset = 0
+    last_telegram_check = time.time()
+    TELEGRAM_POLL_INTERVAL = 8
 
     try:
         for i in range(iterations):
+            # Poll Telegram for commands every ~8 seconds
+            now = time.time()
+            if now - last_telegram_check >= TELEGRAM_POLL_INTERVAL:
+                telegram_offset = _process_telegram_commands(
+                    status_path, kill_switch_path, pair, telegram_offset
+                )
+                last_telegram_check = now
+
             if kill_switch_path.exists():
                 ts = datetime.datetime.now(datetime.timezone.utc).strftime(
                     "%Y-%m-%dT%H:%M:%SZ"
                 )
-                append_trade_event(
-                    trade_events_path,
-                    {
-                        "timestamp": ts,
-                        "event_type": "kill_switch_triggered",
-                        "pair": pair,
-                        "runtime_mode": runtime_mode,
-                        "execution_mode": execution_mode,
-                        "iteration": i + 1,
-                        "reason": "kill switch file exists",
-                    },
-                )
+                ev_kill = {
+                    "timestamp": ts,
+                    "event_type": "kill_switch_triggered",
+                    "pair": pair,
+                    "runtime_mode": runtime_mode,
+                    "execution_mode": execution_mode,
+                    "iteration": i + 1,
+                    "reason": "kill switch file exists",
+                }
+                append_trade_event(trade_events_path, ev_kill)
+                send_alert_for_event(ev_kill)
                 status = _build_status(
                     last_result, True, "kill_switch", None, pair_fallback=pair
                 )
@@ -1645,30 +1712,34 @@ def main() -> int:
                             "size_usd": size_usd,
                             "volume": volume,
                             "price": price,
+                            "reason": result.get("decision_reason")
+                            or result.get("candidate_reason")
+                            or (result.get("strategy", {}).get("reason", "") or "live_order_submitted"),
+                            "signal_strength": result.get("signal_strength"),
                         }
                         if txid:
                             ev["txid"] = txid
                         append_trade_event(trade_events_path, ev)
+                        send_alert_for_event(ev)
                         result["live_order_outcome"] = "live_submitted"
                     except RuntimeError as e:
                         err_msg = str(e)
-                        append_trade_event(
-                            trade_events_path,
-                            {
-                                "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime(
-                                    "%Y-%m-%dT%H:%M:%SZ"
-                                ),
-                                "event_type": "live_order_submission_failed",
-                                "pair": pair,
-                                "runtime_mode": runtime_mode,
-                                "execution_mode": execution_mode,
-                                "side": side,
-                                "order_type": ordertype,
-                                "size_usd": size_usd,
-                                "volume": volume,
-                                "reason": err_msg,
-                            },
-                        )
+                        ev_fail = {
+                            "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime(
+                                "%Y-%m-%dT%H:%M:%SZ"
+                            ),
+                            "event_type": "live_order_submission_failed",
+                            "pair": pair,
+                            "runtime_mode": runtime_mode,
+                            "execution_mode": execution_mode,
+                            "side": side,
+                            "order_type": ordertype,
+                            "size_usd": size_usd,
+                            "volume": volume,
+                            "reason": err_msg,
+                        }
+                        append_trade_event(trade_events_path, ev_fail)
+                        send_alert_for_event(ev_fail)
                         result["live_order_outcome"] = "live_failed"
                         result["live_order_error"] = err_msg
 
