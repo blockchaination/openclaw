@@ -671,12 +671,20 @@ def _run_one_cycle(
     current_momentum = short_momentum(prices, lookback) if lookback >= 1 else 0.0
     current_volatility = volatility(prices, lookback) if lookback >= 2 else 0.0
 
+    xbt_inventory = (
+        (live_account.get("xbt", 0) or 0)
+        if runtime_mode == "live" and live_account is not None
+        else broker.position_units
+    )
+
     decision = maker_first_mean_reversion(
         mid_price=current_mid_price,
         spread=current_spread,
         book_imbalance=current_book_imbalance,
         momentum=current_momentum,
         volatility=current_volatility,
+        xbt_inventory=xbt_inventory,
+        min_xbt_to_sell=MIN_XBT_TO_SELL,
     )
 
     action = decision.get("action", "hold")
@@ -776,8 +784,6 @@ def _run_one_cycle(
         decision_reason = skipped_reason
     elif live_mode_blocked:
         decision_reason = "live_mode_blocked"
-    elif action in ("buy", "sell"):
-        decision_reason = f"signal_{action}"
     else:
         decision_reason = decision.get("reason", "hold")
     signal_strength = _resolve_signal_strength(decision)

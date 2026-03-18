@@ -18,18 +18,18 @@ from quant_engine import _build_status
 
 
 def test_buy_signal_not_suppressed() -> None:
-    """Buy signal not suppressed => raw_signal=buy, final_action=buy, decision_reason=signal_buy."""
+    """Buy signal not suppressed => raw_signal=buy, final_action=buy, decision_reason from strategy."""
     result = {
         "strategy": {"action": "buy"},
         "order": {"submitted": True, "skipped_reason": None},
         "raw_signal": "buy",
         "final_action": "buy",
-        "decision_reason": "signal_buy",
+        "decision_reason": "buy mean-reversion entry",
     }
     status = _build_status(result, False, None, None, pair_fallback="XBTUSD")
     assert status.get("raw_signal") == "buy"
     assert status.get("final_action") == "buy"
-    assert status.get("decision_reason") == "signal_buy"
+    assert status.get("decision_reason") == "buy mean-reversion entry"
 
 
 def test_sell_suppressed_low_inventory() -> None:

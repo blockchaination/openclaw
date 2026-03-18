@@ -2,6 +2,9 @@
 
 MIN_SIGNAL_STRENGTH = 3.0
 
+# Spot state threshold: XBT < this => FLAT (entry only), XBT >= this => LONG (exit only)
+MIN_XBT_TO_SELL = 0.0002
+
 
 def maker_first_mean_reversion(
     mid_price: float,
@@ -9,20 +12,19 @@ def maker_first_mean_reversion(
     book_imbalance: float,
     momentum: float,
     volatility: float,
+    xbt_inventory: float,
+    min_xbt_to_sell: float = MIN_XBT_TO_SELL,
 ) -> dict:
     """
-    Maker-first mean-reversion strategy.
+    Spot-native mean-reversion strategy.
+
+    Two-state model:
+    - FLAT (xbt < min_xbt_to_sell): only evaluate BUY entry. Outputs: buy, hold.
+    - LONG (xbt >= min_xbt_to_sell): only evaluate SELL exit. Outputs: sell, hold.
 
     Pure decision function: no I/O, no order placement. Returns a structured
     decision dict with action (buy/sell/hold), reason, inputs snapshot, and
     maker_hint for downstream order logic.
-
-    Rules:
-    - Hold if mid_price <= 0, spread < 0, or volatility < 0.
-    - momentum_threshold = max(volatility * 0.15, 0.5).
-    - Buy if momentum < -momentum_threshold and book_imbalance > 0.02.
-    - Sell if momentum > momentum_threshold and book_imbalance < -0.02.
-    - Otherwise hold.
     """
     if mid_price <= 0 or spread < 0:
         return {
@@ -36,6 +38,8 @@ def maker_first_mean_reversion(
                 "momentum": momentum,
                 "volatility": volatility,
                 "momentum_threshold": 0.0,
+                "xbt_inventory": xbt_inventory,
+                "spot_state": "flat",
             },
             "maker_hint": {"post_only": True, "preferred_side": "none"},
         }
@@ -52,88 +56,76 @@ def maker_first_mean_reversion(
                 "momentum": momentum,
                 "volatility": volatility,
                 "momentum_threshold": 0.0,
+                "xbt_inventory": xbt_inventory,
+                "spot_state": "flat",
             },
             "maker_hint": {"post_only": True, "preferred_side": "none"},
         }
 
+    spot_state = "long" if xbt_inventory >= min_xbt_to_sell else "flat"
     momentum_threshold = max(volatility * 0.15, 0.5)
     signal_strength = (
         -momentum / momentum_threshold if momentum_threshold > 0 else 0.0
     )
 
-    if momentum < -momentum_threshold and book_imbalance > 0.02:
-        if abs(signal_strength) < MIN_SIGNAL_STRENGTH:
+    inputs = {
+        "mid_price": mid_price,
+        "spread": spread,
+        "book_imbalance": book_imbalance,
+        "momentum": momentum,
+        "volatility": volatility,
+        "momentum_threshold": momentum_threshold,
+        "xbt_inventory": xbt_inventory,
+        "spot_state": spot_state,
+    }
+
+    if spot_state == "flat":
+        # FLAT: only evaluate BUY entry. Never emit sell.
+        if momentum < -momentum_threshold and book_imbalance > 0.02:
+            if abs(signal_strength) < MIN_SIGNAL_STRENGTH:
+                return {
+                    "action": "hold",
+                    "reason": "weak_signal_filtered",
+                    "signal_strength": signal_strength,
+                    "inputs": inputs,
+                    "maker_hint": {"post_only": True, "preferred_side": "none"},
+                }
             return {
-                "action": "hold",
-                "reason": "weak_signal_filtered",
+                "action": "buy",
+                "reason": "buy mean-reversion entry",
                 "signal_strength": signal_strength,
-                "inputs": {
-                    "mid_price": mid_price,
-                    "spread": spread,
-                    "book_imbalance": book_imbalance,
-                    "momentum": momentum,
-                    "volatility": volatility,
-                    "momentum_threshold": momentum_threshold,
-                },
-                "maker_hint": {"post_only": True, "preferred_side": "none"},
+                "inputs": inputs,
+                "maker_hint": {"post_only": True, "preferred_side": "bid"},
             }
         return {
-            "action": "buy",
-            "reason": "buy mean-reversion signal",
-            "signal_strength": signal_strength,
-            "inputs": {
-                "mid_price": mid_price,
-                "spread": spread,
-                "book_imbalance": book_imbalance,
-                "momentum": momentum,
-                "volatility": volatility,
-                "momentum_threshold": momentum_threshold,
-            },
-            "maker_hint": {"post_only": True, "preferred_side": "bid"},
+            "action": "hold",
+            "reason": "no long-entry signal",
+            "signal_strength": None,
+            "inputs": inputs,
+            "maker_hint": {"post_only": True, "preferred_side": "none"},
         }
 
+    # LONG: only evaluate SELL exit. Never emit buy.
     if momentum > momentum_threshold and book_imbalance < -0.02:
         if abs(signal_strength) < MIN_SIGNAL_STRENGTH:
             return {
                 "action": "hold",
                 "reason": "weak_signal_filtered",
                 "signal_strength": signal_strength,
-                "inputs": {
-                    "mid_price": mid_price,
-                    "spread": spread,
-                    "book_imbalance": book_imbalance,
-                    "momentum": momentum,
-                    "volatility": volatility,
-                    "momentum_threshold": momentum_threshold,
-                },
+                "inputs": inputs,
                 "maker_hint": {"post_only": True, "preferred_side": "none"},
             }
         return {
             "action": "sell",
-            "reason": "sell mean-reversion signal",
+            "reason": "sell mean-reversion exit",
             "signal_strength": signal_strength,
-            "inputs": {
-                "mid_price": mid_price,
-                "spread": spread,
-                "book_imbalance": book_imbalance,
-                "momentum": momentum,
-                "volatility": volatility,
-                "momentum_threshold": momentum_threshold,
-            },
+            "inputs": inputs,
             "maker_hint": {"post_only": True, "preferred_side": "ask"},
         }
-
     return {
         "action": "hold",
-        "reason": "no mean-reversion signal",
+        "reason": "no exit signal",
         "signal_strength": None,
-        "inputs": {
-            "mid_price": mid_price,
-            "spread": spread,
-            "book_imbalance": book_imbalance,
-            "momentum": momentum,
-            "volatility": volatility,
-            "momentum_threshold": momentum_threshold,
-        },
+        "inputs": inputs,
         "maker_hint": {"post_only": True, "preferred_side": "none"},
     }
