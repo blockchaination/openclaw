@@ -19,6 +19,8 @@ from pathlib import Path
 from features import spread, mid_price, book_imbalance, short_momentum, volatility
 from paper_broker import PaperBroker
 from risk import allow_trade
+from shadow_model import load_model as load_shadow_model
+from shadow_model import score_candidate as shadow_score_candidate
 from strategy import maker_first_mean_reversion
 
 MAX_LIVE_ORDER_USD = 10
@@ -55,6 +57,11 @@ def default_signal_outcomes_path() -> Path:
 def default_training_examples_path() -> Path:
     """Return default training examples path: <repo_root>/logs/training_examples.jsonl."""
     return _repo_root() / "logs" / "training_examples.jsonl"
+
+
+def default_shadow_inference_path() -> Path:
+    """Return default shadow inference log path: <repo_root>/logs/shadow_inference.jsonl."""
+    return _repo_root() / "logs" / "shadow_inference.jsonl"
 
 
 def append_training_example(path: Path, record: dict) -> None:
@@ -636,6 +643,34 @@ def _is_directional_candidate(result: dict) -> bool:
     return action in ("buy", "sell") or reason == "weak_signal_filtered"
 
 
+def _apply_shadow_inference(
+    result: dict,
+    model: dict | None,
+    shadow_path: Path,
+) -> None:
+    """
+    For directional candidates only: compute model score and probability,
+    add to result, append compact log row. Does nothing for neutral hold.
+    """
+    if model is None or not _is_directional_candidate(result):
+        return
+    score, prob = shadow_score_candidate(model, result)
+    result["model_score"] = round(score, 6)
+    result["model_probability"] = round(prob, 6)
+    ts = result.get("timestamp_utc", "")
+    action = result.get("strategy", {}).get("action", "hold")
+    append_jsonl(
+        shadow_path,
+        {
+            "ts": ts,
+            "iter": result.get("iteration"),
+            "action": action,
+            "score": round(score, 4),
+            "prob": round(prob, 4),
+        },
+    )
+
+
 def _compute_training_labels(
     price_at_signal: float,
     candidate_side: str,
@@ -909,7 +944,7 @@ def _build_status(
         raw_signal = r.get("raw_signal", strategy.get("action", "hold"))
         final_action = r.get("final_action", last_action)
         decision_reason = r.get("decision_reason", order.get("skipped_reason") or "hold")
-    return {
+    out: dict = {
         "timestamp": r.get("timestamp_utc")
         or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "pair": r.get("pair") or pair_fallback,
@@ -933,6 +968,11 @@ def _build_status(
         "error": error,
         **({"live_account": r["live_account"]} if r.get("live_account") is not None else {}),
     }
+    if r.get("model_probability") is not None:
+        out["model_probability"] = r["model_probability"]
+    if r.get("model_score") is not None:
+        out["model_score"] = r["model_score"]
+    return out
 
 
 def main() -> int:
@@ -1110,6 +1150,9 @@ def main() -> int:
     )
     signal_outcomes_path = default_signal_outcomes_path()
     training_examples_path = default_training_examples_path()
+    shadow_inference_path = default_shadow_inference_path()
+
+    shadow_model_obj = load_shadow_model()
 
     status_path.parent.mkdir(parents=True, exist_ok=True)
     trade_events_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1359,6 +1402,8 @@ def main() -> int:
                 trade_events_path=trade_events_path,
             )
             last_result = result
+
+            _apply_shadow_inference(result, shadow_model_obj, shadow_inference_path)
 
             action = result.get("strategy", {}).get("action", "hold")
             order = result.get("order", {})

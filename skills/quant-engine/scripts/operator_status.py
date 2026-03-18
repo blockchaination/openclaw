@@ -143,6 +143,9 @@ def main() -> int:
         lines.append(f"decision reason: {status.get('decision_reason', '-')}")
         ss_str = _format_signal_strength(status.get("signal_strength"))
         lines.append(f"signal strength: {ss_str}")
+        prob = status.get("model_probability")
+        if prob is not None:
+            lines.append(f"model probability: {prob:.4f}")
         lines.append(f"kill switch:     {'ACTIVE' if status.get('kill_switch_active') else 'inactive'}")
         if status.get("shutdown_reason"):
             lines.append(f"shutdown reason: {status['shutdown_reason']}")
