@@ -62,6 +62,7 @@ def test_trainer_writes_model_artifact_to_repo_root_artifacts() -> None:
             {
                 "candidate_side": "buy",
                 "spot_state": "FLAT",
+                "candidate_reason": "buy mean-reversion entry",
                 "signal_strength": 3.0,
                 "spread": 10.0,
                 "book_imbalance": 0.05,
@@ -73,6 +74,7 @@ def test_trainer_writes_model_artifact_to_repo_root_artifacts() -> None:
             {
                 "candidate_side": "buy",
                 "spot_state": "FLAT",
+                "candidate_reason": "buy mean-reversion entry",
                 "signal_strength": 2.0,
                 "spread": 1.0,
                 "book_imbalance": 0.03,
@@ -150,3 +152,51 @@ def test_print_openclaw_paths_output() -> None:
     assert "shadow_inference_path:" in out
     assert "model_artifact_path:" in out
     assert "signal_outcomes_path:" in out
+
+
+def test_check_ai_stack_missing_files() -> None:
+    """check_ai_stack.py runs and reports when files are missing."""
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "check_ai_stack.py")],
+        capture_output=True,
+        text=True,
+        cwd=str(_SCRIPTS),
+    )
+    assert result.returncode == 0
+    assert "OpenClaw AI Stack Check" in result.stdout
+    assert "File existence:" in result.stdout
+
+
+def test_analyzer_handles_older_rows_gracefully() -> None:
+    """analyze_training_examples handles rows without candidate_reason/runtime_reason."""
+    with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+        path = Path(f.name)
+    try:
+        path.write_text(
+            json.dumps({
+                "candidate_side": "buy",
+                "spot_state": "FLAT",
+                "price_after_30s": 101.0,
+                "price_after_60s": 102.0,
+                "price_after_300s": 103.0,
+                "label_30s": 1,
+                "label_60s": 1,
+                "label_300s": 1,
+            }) + "\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(_SCRIPTS / "analyze_training_examples.py"),
+                "--file",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(_SCRIPTS),
+        )
+        assert result.returncode == 0
+        assert "total:  1" in result.stdout
+    finally:
+        path.unlink(missing_ok=True)

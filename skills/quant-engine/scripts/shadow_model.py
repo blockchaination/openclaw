@@ -55,7 +55,11 @@ def load_model(metrics_path: Path | None = None) -> dict | None:
         return None
     if bias is None or not isinstance(bias, (int, float)):
         return None
-    return {"weights": weights, "bias": float(bias), "feature_names": list(names)}
+    out: dict = {"weights": weights, "bias": float(bias), "feature_names": list(names)}
+    thresh = data.get("recommended_shadow_threshold")
+    if thresh is not None and isinstance(thresh, (int, float)):
+        out["recommended_shadow_threshold"] = float(thresh)
+    return out
 
 
 def _safe_float(x: object) -> float:

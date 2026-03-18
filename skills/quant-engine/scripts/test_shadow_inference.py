@@ -37,9 +37,13 @@ def _directional_result() -> dict:
                 "book_imbalance": 0.05,
                 "momentum": -3.5,
                 "volatility": 5.0,
+                "spot_state": "flat",
             },
         },
         "decision_reason": "buy mean-reversion entry",
+        "candidate_side": "buy",
+        "candidate_reason": "buy mean-reversion entry",
+        "runtime_reason": "signal_buy",
         "signal_strength": -3.5,
         "market": {
             "spread": 10.0,
@@ -109,7 +113,34 @@ def test_candidate_gets_scored() -> None:
     row = json.loads(lines[0])
     assert "prob" in row
     assert "score" in row
-    assert row.get("action") == "buy"
+    assert row.get("candidate_side") == "buy"
+    assert row.get("candidate_reason") == "buy mean-reversion entry"
+    assert row.get("runtime_reason") == "signal_buy"
+    assert "spot_state" in row
+    assert "signal_strength" in row
+
+
+def test_shadow_inference_includes_threshold_when_present() -> None:
+    """Shadow log includes threshold when model has recommended_shadow_threshold."""
+    model = {
+        "weights": [0.0] * 6,
+        "bias": 0.0,
+        "feature_names": [
+            "signal_strength",
+            "spread",
+            "book_imbalance",
+            "momentum",
+            "volatility",
+            "momentum_threshold",
+        ],
+        "recommended_shadow_threshold": 0.65,
+    }
+    result = _directional_result()
+    shadow_path = Path(tempfile.mkdtemp()) / "shadow.jsonl"
+    _apply_shadow_inference(result, model, shadow_path)
+    assert shadow_path.exists()
+    row = json.loads(shadow_path.read_text().strip())
+    assert row.get("threshold") == 0.65
 
 
 def test_neutral_hold_no_bogus_score() -> None:
@@ -185,7 +216,7 @@ def test_score_candidate() -> None:
 
 
 def test_status_prints_probability_cleanly() -> None:
-    """operator_status prints model probability when present."""
+    """operator_status prints candidate/runtime/model fields when present."""
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
         status_path = Path(f.name)
     try:
@@ -196,6 +227,9 @@ def test_status_prints_probability_cleanly() -> None:
             "raw_signal": "buy",
             "final_action": "buy",
             "decision_reason": "buy mean-reversion entry",
+            "candidate_side": "buy",
+            "candidate_reason": "buy mean-reversion entry",
+            "runtime_reason": "signal_buy",
             "signal_strength": -3.5,
             "model_probability": 0.7234,
             "kill_switch_active": False,
@@ -222,6 +256,9 @@ def test_status_prints_probability_cleanly() -> None:
             )
             assert result.returncode == 0
             assert "model probability: 0.7234" in result.stdout
+            assert "candidate side:" in result.stdout
+            assert "candidate reason:" in result.stdout
+            assert "runtime reason:" in result.stdout
         finally:
             events_path.unlink(missing_ok=True)
     finally:

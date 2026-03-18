@@ -143,6 +143,12 @@ def main() -> int:
         lines.append(f"decision reason: {status.get('decision_reason', '-')}")
         ss_str = _format_signal_strength(status.get("signal_strength"))
         lines.append(f"signal strength: {ss_str}")
+        cs = status.get("candidate_side")
+        lines.append(f"candidate side:  {cs if cs else '-'}")
+        cr = status.get("candidate_reason")
+        lines.append(f"candidate reason: {cr if cr else '-'}")
+        rr = status.get("runtime_reason")
+        lines.append(f"runtime reason:  {rr if rr else '-'}")
         prob = status.get("model_probability")
         if prob is not None:
             lines.append(f"model probability: {prob:.4f}")

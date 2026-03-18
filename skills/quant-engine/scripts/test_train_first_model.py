@@ -26,18 +26,19 @@ from train_first_model import (
 
 
 def test_dataset_filtering() -> None:
-    """Buy+FLAT filter keeps only candidate_side=buy and spot_state=FLAT."""
+    """Buy+FLAT+valid candidate_reason filter."""
     records = [
-        {"candidate_side": "buy", "spot_state": "FLAT", "label_300s": 1},
-        {"candidate_side": "buy", "spot_state": "LONG", "label_300s": 0},
-        {"candidate_side": "sell", "spot_state": "FLAT", "label_300s": 1},
-        {"candidate_side": "sell", "spot_state": "LONG", "label_300s": 0},
-        {"candidate_side": "buy", "spot_state": "FLAT", "label_300s": 0},
+        {"candidate_side": "buy", "spot_state": "FLAT", "candidate_reason": "buy mean-reversion entry", "label_300s": 1},
+        {"candidate_side": "buy", "spot_state": "FLAT", "candidate_reason": "live_mode_blocked", "label_300s": 0},
+        {"candidate_side": "buy", "spot_state": "LONG", "candidate_reason": "buy mean-reversion entry", "label_300s": 0},
+        {"candidate_side": "sell", "spot_state": "FLAT", "candidate_reason": "sell mean-reversion exit", "label_300s": 1},
+        {"candidate_side": "buy", "spot_state": "FLAT", "candidate_reason": "weak_signal_filtered", "label_300s": 0},
     ]
     filtered = _filter_buy_flat(records)
     assert len(filtered) == 2
     assert all((r.get("candidate_side") or "").lower() == "buy" for r in filtered)
     assert all((r.get("spot_state") or "").upper() == "FLAT" for r in filtered)
+    assert all(r.get("candidate_reason") in ("buy mean-reversion entry", "weak_signal_filtered") for r in filtered)
 
 
 def test_load_completed_ignores_incomplete() -> None:
@@ -91,6 +92,7 @@ def test_metrics_file_output() -> None:
             {
                 "candidate_side": "buy",
                 "spot_state": "FLAT",
+                "candidate_reason": "buy mean-reversion entry",
                 "signal_strength": 3.0,
                 "spread": 10.0,
                 "book_imbalance": 0.05,
@@ -102,6 +104,7 @@ def test_metrics_file_output() -> None:
             {
                 "candidate_side": "buy",
                 "spot_state": "FLAT",
+                "candidate_reason": "buy mean-reversion entry",
                 "signal_strength": 2.0,
                 "spread": 1.0,
                 "book_imbalance": 0.03,
@@ -113,6 +116,7 @@ def test_metrics_file_output() -> None:
             {
                 "candidate_side": "buy",
                 "spot_state": "FLAT",
+                "candidate_reason": "weak_signal_filtered",
                 "signal_strength": 2.5,
                 "spread": 5.0,
                 "book_imbalance": 0.04,
@@ -155,16 +159,19 @@ def test_metrics_file_output() -> None:
         assert "accuracy" in data["metrics"]
         assert "precision" in data["metrics"]
         assert "recall" in data["metrics"]
+        assert "positive_prediction_rate" in data["metrics"]
+        assert "recommended_shadow_threshold" in data
         assert "timestamp" in data
     finally:
         data_path.unlink(missing_ok=True)
 
 
 def test_compute_metrics() -> None:
-    """Accuracy, precision, recall computed correctly."""
+    """Accuracy, precision, recall, positive_prediction_rate computed correctly."""
     y_true = [1, 0, 1, 0, 1]
     y_pred = [1, 0, 0, 0, 1]
     m = _compute_metrics(y_true, y_pred)
     assert m["accuracy"] == 0.8
     assert m["precision"] == 1.0
     assert m["recall"] == 2 / 3
+    assert "positive_prediction_rate" in m

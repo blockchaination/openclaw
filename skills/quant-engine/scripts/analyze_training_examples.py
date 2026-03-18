@@ -40,6 +40,22 @@ def _load_completed_records(path: Path) -> list[dict]:
     return records
 
 
+def _get_candidate_reason(rec: dict) -> str:
+    """Extract candidate_reason with fallback for older rows."""
+    cr = rec.get("candidate_reason")
+    if cr and isinstance(cr, str) and cr.strip():
+        return cr.strip()
+    return rec.get("decision_reason") or "-"
+
+
+def _get_runtime_reason(rec: dict) -> str:
+    """Extract runtime_reason with fallback for older rows."""
+    rr = rec.get("runtime_reason")
+    if rr and isinstance(rr, str) and rr.strip():
+        return rr.strip()
+    return rec.get("decision_reason") or "-"
+
+
 def _compute_metrics(records: list[dict]) -> dict:
     """Compute summary metrics from completed training examples."""
     if not records:
@@ -58,6 +74,9 @@ def _compute_metrics(records: list[dict]) -> dict:
             "label_30s_positive_rate": 0.0,
             "label_60s_positive_rate": 0.0,
             "label_300s_positive_rate": 0.0,
+            "candidate_reason_counts": {},
+            "runtime_reason_counts": {},
+            "v1_training_count": 0,
         }
     buy_recs = [r for r in records if (r.get("candidate_side") or "").lower() == "buy"]
     sell_recs = [r for r in records if (r.get("candidate_side") or "").lower() == "sell"]
@@ -97,6 +116,28 @@ def _compute_metrics(records: list[dict]) -> dict:
     rate_60 = (pos_60 / len(labels_60) * 100.0) if labels_60 else 0.0
     rate_300 = (pos_300 / len(labels_300) * 100.0) if labels_300 else 0.0
 
+    candidate_reason_counts: dict[str, int] = {}
+    runtime_reason_counts: dict[str, int] = {}
+    for r in records:
+        cr = _get_candidate_reason(r)
+        candidate_reason_counts[cr] = candidate_reason_counts.get(cr, 0) + 1
+        rr = _get_runtime_reason(r)
+        runtime_reason_counts[rr] = runtime_reason_counts.get(rr, 0) + 1
+
+    valid_candidate_reasons = frozenset({
+        "buy mean-reversion entry",
+        "sell mean-reversion exit",
+        "weak_signal_filtered",
+    })
+    v1_training_count = sum(
+        1
+        for r in records
+        if (r.get("candidate_side") or "").lower() == "buy"
+        and (r.get("spot_state") or "").upper() == "FLAT"
+        and _get_candidate_reason(r) in valid_candidate_reasons
+        and r.get("label_300s") is not None
+    )
+
     return {
         "total": len(records),
         "buy": len(buy_recs),
@@ -112,6 +153,9 @@ def _compute_metrics(records: list[dict]) -> dict:
         "label_30s_positive_rate": rate_30,
         "label_60s_positive_rate": rate_60,
         "label_300s_positive_rate": rate_300,
+        "candidate_reason_counts": candidate_reason_counts,
+        "runtime_reason_counts": runtime_reason_counts,
+        "v1_training_count": v1_training_count,
     }
 
 
@@ -155,6 +199,21 @@ def main() -> int:
     print(f"  30s:  {m['label_30s_positive_rate']:.1f}%")
     print(f"  60s:  {m['label_60s_positive_rate']:.1f}%")
     print(f"  300s: {m['label_300s_positive_rate']:.1f}%")
+    print()
+    cr_counts = m.get("candidate_reason_counts") or {}
+    if cr_counts:
+        print("Candidate reason breakdown:")
+        for k, v in sorted(cr_counts.items(), key=lambda x: -x[1]):
+            print(f"  {k}: {v}")
+        print()
+    rr_counts = m.get("runtime_reason_counts") or {}
+    if rr_counts:
+        print("Runtime reason breakdown:")
+        for k, v in sorted(rr_counts.items(), key=lambda x: -x[1]):
+            print(f"  {k}: {v}")
+        print()
+    v1 = m.get("v1_training_count", 0)
+    print(f"Completed examples used for v1 training (buy+FLAT+valid candidate_reason+label_300s): {v1}")
     print()
     print(f"file: {path}")
 

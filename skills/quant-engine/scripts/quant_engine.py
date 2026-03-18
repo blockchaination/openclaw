@@ -637,18 +637,24 @@ def _apply_shadow_inference(
     score, prob = shadow_score_candidate(model, result)
     result["model_score"] = round(score, 6)
     result["model_probability"] = round(prob, 6)
-    ts = result.get("timestamp_utc", "")
-    action = result.get("strategy", {}).get("action", "hold")
-    append_jsonl(
-        shadow_path,
-        {
-            "ts": ts,
-            "iter": result.get("iteration"),
-            "action": action,
-            "score": round(score, 4),
-            "prob": round(prob, 4),
-        },
-    )
+    strategy_inputs = result.get("strategy", {}).get("inputs", {})
+    spot_state_raw = strategy_inputs.get("spot_state", "flat")
+    spot_state = "FLAT" if spot_state_raw == "flat" else "LONG"
+    row: dict = {
+        "ts": result.get("timestamp_utc", ""),
+        "iter": result.get("iteration"),
+        "candidate_side": result.get("candidate_side", ""),
+        "candidate_reason": result.get("candidate_reason", ""),
+        "runtime_reason": result.get("runtime_reason", ""),
+        "score": round(score, 4),
+        "prob": round(prob, 4),
+        "spot_state": spot_state,
+        "signal_strength": result.get("signal_strength"),
+    }
+    threshold = model.get("recommended_shadow_threshold")
+    if threshold is not None:
+        row["threshold"] = threshold
+    append_jsonl(shadow_path, row)
 
 
 def _compute_training_labels(
@@ -838,14 +844,27 @@ def _run_one_cycle(
     timestamp_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     raw_signal = action
     final_action = "hold" if (skipped_reason or live_mode_blocked) else action
+    candidate_reason = decision.get("reason", "hold")
     if skipped_reason:
         decision_reason = skipped_reason
+        runtime_reason = skipped_reason
     elif live_mode_blocked:
         decision_reason = "live_mode_blocked"
+        runtime_reason = "live_mode_blocked"
     else:
-        decision_reason = decision.get("reason", "hold")
+        decision_reason = candidate_reason
+        runtime_reason = (
+            "signal_buy" if action == "buy" else "signal_sell" if action == "sell" else candidate_reason
+        )
     signal_strength = _resolve_signal_strength(decision)
-    return {
+    spot_state_raw = decision.get("inputs", {}).get("spot_state", "flat")
+    is_directional = action in ("buy", "sell") or candidate_reason == "weak_signal_filtered"
+    candidate_side = (
+        (action if action in ("buy", "sell") else ("buy" if spot_state_raw == "flat" else "sell"))
+        if is_directional
+        else None
+    )
+    out: dict = {
         "timestamp_utc": timestamp_utc,
         "iteration": iteration,
         "pair": pair,
@@ -854,6 +873,7 @@ def _run_one_cycle(
         "raw_signal": raw_signal,
         "final_action": final_action,
         "decision_reason": decision_reason,
+        "runtime_reason": runtime_reason,
         "signal_strength": signal_strength,
         "market": {
             "bid": best_bid,
@@ -886,6 +906,10 @@ def _run_one_cycle(
         "live_order_ready": live_order_ready,
         "live_account": live_account,
     }
+    if is_directional:
+        out["candidate_side"] = candidate_side
+        out["candidate_reason"] = candidate_reason
+    return out
 
 
 def _build_status(
@@ -952,6 +976,12 @@ def _build_status(
         out["model_probability"] = r["model_probability"]
     if r.get("model_score") is not None:
         out["model_score"] = r["model_score"]
+    if r.get("candidate_side") is not None:
+        out["candidate_side"] = r["candidate_side"]
+    if r.get("candidate_reason") is not None:
+        out["candidate_reason"] = r["candidate_reason"]
+    if r.get("runtime_reason") is not None:
+        out["runtime_reason"] = r["runtime_reason"]
     return out
 
 
@@ -1678,7 +1708,8 @@ def main() -> int:
                             "runtime_mode": runtime_mode,
                             "spot_state": spot_state,
                             "candidate_side": candidate_side,
-                            "decision_reason": result.get("decision_reason", ""),
+                            "candidate_reason": result.get("candidate_reason", result.get("decision_reason", "")),
+                            "runtime_reason": result.get("runtime_reason", result.get("decision_reason", "")),
                             "signal_strength": result.get("signal_strength"),
                             "mid_price": round(mid, 2),
                             "spread": _safe_float(result.get("market", {}).get("spread")),

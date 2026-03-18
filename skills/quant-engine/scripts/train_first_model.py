@@ -60,14 +60,40 @@ def _load_completed_records(path: Path) -> list[dict]:
     return records
 
 
+# Valid candidate reasons for ML training (strategy semantics, not runtime blocks)
+_VALID_CANDIDATE_REASONS = frozenset({
+    "buy mean-reversion entry",
+    "sell mean-reversion exit",
+    "weak_signal_filtered",
+})
+
+
+def _get_candidate_reason(rec: dict) -> str | None:
+    """Extract candidate_reason with fallback for older rows. Returns None if invalid."""
+    cr = rec.get("candidate_reason")
+    if cr and isinstance(cr, str) and cr.strip():
+        return cr.strip()
+    dr = rec.get("decision_reason")
+    if dr and isinstance(dr, str) and dr.strip():
+        return dr.strip()
+    return None
+
+
 def _filter_buy_flat(records: list[dict]) -> list[dict]:
-    """Filter to candidate_side==buy and spot_state==FLAT."""
-    return [
-        r
-        for r in records
-        if (r.get("candidate_side") or "").lower() == "buy"
-        and (r.get("spot_state") or "").upper() == "FLAT"
-    ]
+    """Filter to candidate_side==buy, spot_state==FLAT, valid candidate_reason."""
+    out: list[dict] = []
+    for r in records:
+        if (r.get("candidate_side") or "").lower() != "buy":
+            continue
+        if (r.get("spot_state") or "").upper() != "FLAT":
+            continue
+        cr = _get_candidate_reason(r)
+        if cr is None:
+            continue
+        if cr not in _VALID_CANDIDATE_REASONS:
+            continue
+        out.append(r)
+    return out
 
 
 def _safe_float(x: object) -> float:
@@ -131,10 +157,10 @@ def _predict_proba(w: list[float], b: float, x: list[float]) -> float:
 
 
 def _compute_metrics(y_true: list[int], y_pred: list[int]) -> dict[str, float]:
-    """Compute accuracy, precision, recall."""
+    """Compute accuracy, precision, recall, positive_prediction_rate."""
     n = len(y_true)
     if n == 0:
-        return {"accuracy": 0.0, "precision": 0.0, "recall": 0.0}
+        return {"accuracy": 0.0, "precision": 0.0, "recall": 0.0, "positive_prediction_rate": 0.0}
     correct = sum(1 for i in range(n) if y_true[i] == y_pred[i])
     accuracy = correct / n
 
@@ -143,8 +169,41 @@ def _compute_metrics(y_true: list[int], y_pred: list[int]) -> dict[str, float]:
     fn = sum(1 for i in range(n) if y_true[i] == 1 and y_pred[i] == 0)
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    pos_pred = sum(1 for i in range(n) if y_pred[i] == 1)
+    positive_prediction_rate = pos_pred / n if n > 0 else 0.0
 
-    return {"accuracy": accuracy, "precision": precision, "recall": recall}
+    return {
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "positive_prediction_rate": positive_prediction_rate,
+    }
+
+
+def _recommended_shadow_threshold(
+    y_true: list[int],
+    y_probs: list[float],
+    min_positive_rate: float = 0.05,
+) -> float:
+    """Choose threshold with best precision among those with >= min_positive_rate positive predictions."""
+    candidates = [0.50, 0.55, 0.60, 0.65, 0.70]
+    best_precision = -1.0
+    best_thresh = 0.60
+    n = len(y_true)
+    if n == 0:
+        return 0.60
+    for thresh in candidates:
+        y_pred = [1 if p >= thresh else 0 for p in y_probs]
+        pos_rate = sum(y_pred) / n
+        if pos_rate < min_positive_rate:
+            continue
+        tp = sum(1 for i in range(n) if y_true[i] == 1 and y_pred[i] == 1)
+        fp = sum(1 for i in range(n) if y_true[i] == 0 and y_pred[i] == 1)
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        if prec > best_precision:
+            best_precision = prec
+            best_thresh = thresh
+    return best_thresh
 
 
 def main() -> int:
@@ -187,10 +246,12 @@ def main() -> int:
     y_test = [int(r.get("label_300s", 0)) for r in test_recs]
 
     w, b = _train_logistic_regression(X_train, y_train)
-    y_pred = [1 if _predict_proba(w, b, x) >= 0.5 else 0 for x in X_test]
+    y_probs = [_predict_proba(w, b, x) for x in X_test]
+    y_pred = [1 if p >= 0.5 else 0 for p in y_probs]
 
     baseline_pos = sum(y_test) / len(y_test) if y_test else 0.0
     metrics = _compute_metrics(y_test, y_pred)
+    recommended_thresh = _recommended_shadow_threshold(y_test, y_probs)
 
     print("OpenClaw First Model Training")
     print("------------------------------")
@@ -203,6 +264,8 @@ def main() -> int:
     print(f"  accuracy:  {metrics['accuracy']:.4f}")
     print(f"  precision: {metrics['precision']:.4f}")
     print(f"  recall:    {metrics['recall']:.4f}")
+    print(f"  positive_prediction_rate: {metrics['positive_prediction_rate']:.4f}")
+    print(f"  recommended_shadow_threshold: {recommended_thresh:.2f}")
     print()
 
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -216,6 +279,7 @@ def main() -> int:
         "metrics": metrics,
         "weights": w,
         "bias": b,
+        "recommended_shadow_threshold": recommended_thresh,
     }
     with metrics_path.open("w", encoding="utf-8") as f:
         json.dump(output, f, indent=2)
