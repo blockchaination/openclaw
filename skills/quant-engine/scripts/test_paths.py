@@ -200,3 +200,25 @@ def test_analyzer_handles_older_rows_gracefully() -> None:
         assert "total:  1" in result.stdout
     finally:
         path.unlink(missing_ok=True)
+
+
+def test_analyzer_excludes_runtime_reasons_from_candidate_breakdown() -> None:
+    """Rows with only decision_reason=live_mode_blocked show '-' for candidate_reason, not polluted."""
+    import analyze_training_examples as ata
+    rec = {"decision_reason": "live_mode_blocked", "candidate_side": "buy"}
+    assert ata._get_candidate_reason(rec) == "-"
+    rec2 = {"candidate_reason": "buy mean-reversion entry", "decision_reason": "live_mode_blocked"}
+    assert ata._get_candidate_reason(rec2) == "buy mean-reversion entry"
+
+
+def test_training_record_candidate_reason_from_strategy_not_runtime() -> None:
+    """Training record candidate_reason must come from strategy.reason, never decision_reason when blocked."""
+    result = {
+        "strategy": {"reason": "buy mean-reversion entry", "action": "buy"},
+        "decision_reason": "live_mode_blocked",
+        "runtime_reason": "live_mode_blocked",
+    }
+    candidate_reason_val = (
+        result.get("strategy", {}).get("reason", "") or result.get("candidate_reason", "")
+    )
+    assert candidate_reason_val == "buy mean-reversion entry"

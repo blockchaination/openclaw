@@ -111,6 +111,7 @@ def test_candidate_gets_scored() -> None:
     lines = [l.strip() for l in shadow_path.read_text().splitlines() if l.strip()]
     assert len(lines) == 1
     row = json.loads(lines[0])
+    assert "action" not in row, "shadow log must not use legacy action field"
     assert "prob" in row
     assert "score" in row
     assert row.get("candidate_side") == "buy"

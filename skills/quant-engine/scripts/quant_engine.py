@@ -637,14 +637,18 @@ def _apply_shadow_inference(
     score, prob = shadow_score_candidate(model, result)
     result["model_score"] = round(score, 6)
     result["model_probability"] = round(prob, 6)
-    strategy_inputs = result.get("strategy", {}).get("inputs", {})
+    strategy = result.get("strategy", {})
+    strategy_inputs = strategy.get("inputs", {})
     spot_state_raw = strategy_inputs.get("spot_state", "flat")
     spot_state = "FLAT" if spot_state_raw == "flat" else "LONG"
+    action = strategy.get("action", "hold")
+    candidate_side = result.get("candidate_side") or (action if action in ("buy", "sell") else ("buy" if spot_state_raw == "flat" else "sell"))
+    candidate_reason = result.get("candidate_reason") or strategy.get("reason", "")
     row: dict = {
         "ts": result.get("timestamp_utc", ""),
         "iter": result.get("iteration"),
-        "candidate_side": result.get("candidate_side", ""),
-        "candidate_reason": result.get("candidate_reason", ""),
+        "candidate_side": candidate_side,
+        "candidate_reason": candidate_reason,
         "runtime_reason": result.get("runtime_reason", ""),
         "score": round(score, 4),
         "prob": round(prob, 4),
@@ -1702,13 +1706,14 @@ def main() -> int:
                     except (ValueError, TypeError):
                         signal_time = None
                     if signal_time is not None:
+                        candidate_reason_val = result.get("strategy", {}).get("reason", "") or result.get("candidate_reason", "")
                         training_record = {
                             "timestamp": ts_str,
                             "pair": pair,
                             "runtime_mode": runtime_mode,
                             "spot_state": spot_state,
                             "candidate_side": candidate_side,
-                            "candidate_reason": result.get("candidate_reason", result.get("decision_reason", "")),
+                            "candidate_reason": candidate_reason_val,
                             "runtime_reason": result.get("runtime_reason", result.get("decision_reason", "")),
                             "signal_strength": result.get("signal_strength"),
                             "mid_price": round(mid, 2),

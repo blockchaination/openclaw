@@ -40,12 +40,26 @@ def _load_completed_records(path: Path) -> list[dict]:
     return records
 
 
+_RUNTIME_ONLY_REASONS = frozenset({
+    "live_mode_blocked",
+    "buy_cooldown_active",
+    "sell_cooldown_active",
+    "risk_blocked",
+    "buy_suppressed_low_usd",
+    "sell_suppressed_low_inventory",
+    "no_inventory_to_sell",
+})
+
+
 def _get_candidate_reason(rec: dict) -> str:
-    """Extract candidate_reason with fallback for older rows."""
+    """Extract candidate_reason. Never use runtime-only values for candidate semantics."""
     cr = rec.get("candidate_reason")
     if cr and isinstance(cr, str) and cr.strip():
         return cr.strip()
-    return rec.get("decision_reason") or "-"
+    dr = rec.get("decision_reason")
+    if dr and isinstance(dr, str) and dr.strip() and dr.strip() not in _RUNTIME_ONLY_REASONS:
+        return dr.strip()
+    return "-"
 
 
 def _get_runtime_reason(rec: dict) -> str:
