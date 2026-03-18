@@ -12,6 +12,8 @@ import json
 import math
 from pathlib import Path
 
+from paths import default_model_artifact_path
+
 
 FEATURE_NAMES = [
     "signal_strength",
@@ -21,15 +23,6 @@ FEATURE_NAMES = [
     "volatility",
     "momentum_threshold",
 ]
-
-
-def _repo_root() -> Path:
-    """Return repo root (parent of skills/)."""
-    return Path(__file__).resolve().parents[3]
-
-
-def _default_metrics_path() -> Path:
-    return _repo_root() / "artifacts" / "first_model_metrics.json"
 
 
 def _sigmoid(x: float) -> float:
@@ -45,7 +38,7 @@ def load_model(metrics_path: Path | None = None) -> dict | None:
     Load model metadata from JSON. Return dict with weights, bias, feature_names,
     or None if file missing/invalid.
     """
-    path = metrics_path or _default_metrics_path()
+    path = metrics_path or default_model_artifact_path()
     if not path.exists():
         return None
     try:

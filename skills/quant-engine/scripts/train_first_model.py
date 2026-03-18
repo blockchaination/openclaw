@@ -17,6 +17,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from paths import default_artifacts_dir, default_model_artifact_path, default_training_examples_path
+
 
 FEATURE_NAMES = [
     "signal_strength",
@@ -26,19 +28,6 @@ FEATURE_NAMES = [
     "volatility",
     "momentum_threshold",
 ]
-
-
-def _repo_root() -> Path:
-    """Return repo root (parent of skills/)."""
-    return Path(__file__).resolve().parents[3]
-
-
-def _default_path() -> Path:
-    return _repo_root() / "logs" / "training_examples.jsonl"
-
-
-def _default_artifacts_dir() -> Path:
-    return _repo_root() / "artifacts"
 
 
 def _load_completed_records(path: Path) -> list[dict]:
@@ -166,17 +155,17 @@ def main() -> int:
         "--file",
         type=Path,
         default=None,
-        help=f"Path to training examples JSONL (default: {_default_path()})",
+        help=f"Path to training examples JSONL (default: {default_training_examples_path()})",
     )
     parser.add_argument(
         "--artifacts-dir",
         type=Path,
         default=None,
-        help=f"Directory for output artifacts (default: {_default_artifacts_dir()})",
+        help=f"Directory for output artifacts (default: {default_artifacts_dir()})",
     )
     args = parser.parse_args()
-    path = args.file or _default_path()
-    artifacts_dir = args.artifacts_dir or _default_artifacts_dir()
+    path = args.file or default_training_examples_path()
+    artifacts_dir = args.artifacts_dir or default_artifacts_dir()
 
     records = _load_completed_records(path)
     buy_flat = _filter_buy_flat(records)

@@ -12,14 +12,7 @@ import json
 import sys
 from pathlib import Path
 
-
-def _repo_root() -> Path:
-    """Return repo root (parent of skills/)."""
-    return Path(__file__).resolve().parents[3]
-
-
-def _default_path() -> Path:
-    return _repo_root() / "logs" / "training_examples.jsonl"
+from paths import default_training_examples_path
 
 
 def _load_completed_records(path: Path) -> list[dict]:
@@ -130,10 +123,10 @@ def main() -> int:
         "--file",
         type=Path,
         default=None,
-        help=f"Path to training examples JSONL (default: {_default_path()})",
+        help=f"Path to training examples JSONL (default: {default_training_examples_path()})",
     )
     args = parser.parse_args()
-    path = args.file or _default_path()
+    path = args.file or default_training_examples_path()
 
     records = _load_completed_records(path)
     m = _compute_metrics(records)

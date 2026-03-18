@@ -18,6 +18,16 @@ from pathlib import Path
 
 from features import spread, mid_price, book_imbalance, short_momentum, volatility
 from paper_broker import PaperBroker
+from paths import (
+    default_log_path,
+    default_shadow_inference_path,
+    default_signal_outcomes_path,
+    default_status_path,
+    default_trade_events_path,
+    default_training_examples_path,
+    ensure_logs_and_artifacts_dirs,
+    repo_root,
+)
 from risk import allow_trade
 from shadow_model import load_model as load_shadow_model
 from shadow_model import score_candidate as shadow_score_candidate
@@ -30,38 +40,8 @@ MIN_SECONDS_BETWEEN_SAME_SIDE_ACTIONS = 300
 
 
 def _repo_root() -> Path:
-    """Return repo root (parent of skills/)."""
-    return Path(__file__).resolve().parents[3]
-
-
-def default_log_path() -> Path:
-    """Return default run log path: <repo_root>/logs/quant_engine_runs.jsonl."""
-    return _repo_root() / "logs" / "quant_engine_runs.jsonl"
-
-
-def default_status_path() -> Path:
-    """Return default status file path: <repo_root>/logs/status.json."""
-    return _repo_root() / "logs" / "status.json"
-
-
-def default_trade_events_path() -> Path:
-    """Return default trade events path: <repo_root>/logs/trade_events.jsonl."""
-    return _repo_root() / "logs" / "trade_events.jsonl"
-
-
-def default_signal_outcomes_path() -> Path:
-    """Return default signal outcomes path: <repo_root>/logs/signal_outcomes.jsonl."""
-    return _repo_root() / "logs" / "signal_outcomes.jsonl"
-
-
-def default_training_examples_path() -> Path:
-    """Return default training examples path: <repo_root>/logs/training_examples.jsonl."""
-    return _repo_root() / "logs" / "training_examples.jsonl"
-
-
-def default_shadow_inference_path() -> Path:
-    """Return default shadow inference log path: <repo_root>/logs/shadow_inference.jsonl."""
-    return _repo_root() / "logs" / "shadow_inference.jsonl"
+    """Return repo root (parent of skills/). Kept for backward compat; use paths.repo_root()."""
+    return repo_root()
 
 
 def append_training_example(path: Path, record: dict) -> None:
@@ -1154,6 +1134,7 @@ def main() -> int:
 
     shadow_model_obj = load_shadow_model()
 
+    ensure_logs_and_artifacts_dirs()
     status_path.parent.mkdir(parents=True, exist_ok=True)
     trade_events_path.parent.mkdir(parents=True, exist_ok=True)
     signal_outcomes_path.parent.mkdir(parents=True, exist_ok=True)
