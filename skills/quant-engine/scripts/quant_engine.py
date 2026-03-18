@@ -52,6 +52,22 @@ def default_signal_outcomes_path() -> Path:
     return _repo_root() / "logs" / "signal_outcomes.jsonl"
 
 
+def default_training_examples_path() -> Path:
+    """Return default training examples path: <repo_root>/logs/training_examples.jsonl."""
+    return _repo_root() / "logs" / "training_examples.jsonl"
+
+
+def append_training_example(path: Path, record: dict) -> None:
+    """Append one training example row as JSONL line. Create parent dirs if needed."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(record, separators=(",", ":")) + "\n"
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError as e:
+        raise RuntimeError(f"Failed to append training example to {path}: {e}") from e
+
+
 def append_signal_outcome(path: Path, record: dict) -> None:
     """Append one signal outcome record as JSONL line. Create parent dirs if needed."""
     try:
@@ -613,6 +629,33 @@ def _extract_prices_from_trades(trades_data: object, last_price: float) -> list[
     return prices
 
 
+def _is_directional_candidate(result: dict) -> bool:
+    """True if result represents a real directional candidate (buy, sell, or weak_signal_filtered)."""
+    action = result.get("strategy", {}).get("action", "hold")
+    reason = result.get("decision_reason", "")
+    return action in ("buy", "sell") or reason == "weak_signal_filtered"
+
+
+def _compute_training_labels(
+    price_at_signal: float,
+    candidate_side: str,
+    price_after_30s: float | None,
+    price_after_60s: float | None,
+    price_after_300s: float | None,
+) -> dict[str, int | None]:
+    """Compute label_30s, label_60s, label_300s for a training example."""
+    out: dict[str, int | None] = {}
+    for delta, price in [(30, price_after_30s), (60, price_after_60s), (300, price_after_300s)]:
+        if price is not None and price_at_signal > 0:
+            if candidate_side == "buy":
+                out[f"label_{delta}s"] = 1 if price > price_at_signal else 0
+            else:
+                out[f"label_{delta}s"] = 1 if price < price_at_signal else 0
+        else:
+            out[f"label_{delta}s"] = None
+    return out
+
+
 def _resolve_signal_strength(decision: dict) -> int | float | None:
     """Enforce signal_strength contract: None for non-directional hold, else pass through."""
     if decision.get("action") == "hold" and decision.get("reason") != "weak_signal_filtered":
@@ -1066,6 +1109,7 @@ def main() -> int:
         else Path(args.trade_events_file)
     )
     signal_outcomes_path = default_signal_outcomes_path()
+    training_examples_path = default_training_examples_path()
 
     status_path.parent.mkdir(parents=True, exist_ok=True)
     trade_events_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1196,6 +1240,7 @@ def main() -> int:
     )
 
     pending_signal_outcomes: list[dict] = []
+    pending_training_examples: list[dict] = []
     SIGNAL_OUTCOME_DELTAS = (30, 60, 300)
 
     try:
@@ -1258,6 +1303,40 @@ def main() -> int:
                         record = {k: v for k, v in pending.items() if not k.startswith("_")}
                         append_signal_outcome(signal_outcomes_path, record)
                         pending_signal_outcomes.pop(idx)
+                    break
+
+            # Best-effort: process one pending training example per iteration (non-blocking)
+            for idx, pending in enumerate(pending_training_examples):
+                signal_time = pending.get("_signal_time")
+                if signal_time is None:
+                    continue
+                if signal_time.tzinfo is None:
+                    signal_time = signal_time.replace(tzinfo=datetime.timezone.utc)
+                elapsed = (now_utc - signal_time).total_seconds()
+                updated = False
+                for delta in SIGNAL_OUTCOME_DELTAS:
+                    key = f"price_after_{delta}s"
+                    if elapsed >= delta and pending.get(key) is None:
+                        mid = _fetch_mid_price(pending["pair"])
+                        if mid is not None:
+                            pending[key] = round(mid, 2)
+                            updated = True
+                        break
+                if updated:
+                    if all(pending.get(f"price_after_{d}s") is not None for d in SIGNAL_OUTCOME_DELTAS):
+                        price_at = _safe_float(pending.get("mid_price"))
+                        candidate_side = pending.get("candidate_side", "buy")
+                        labels = _compute_training_labels(
+                            price_at or 0.0,
+                            candidate_side,
+                            _safe_float(pending.get("price_after_30s")),
+                            _safe_float(pending.get("price_after_60s")),
+                            _safe_float(pending.get("price_after_300s")),
+                        )
+                        pending.update(labels)
+                        record = {k: v for k, v in pending.items() if not k.startswith("_")}
+                        append_training_example(training_examples_path, record)
+                        pending_training_examples.pop(idx)
                     break
 
             if iterations > 1:
@@ -1547,6 +1626,50 @@ def main() -> int:
                         "signal_strength": result.get("signal_strength"),
                     },
                 )
+
+            is_directional_candidate = _is_directional_candidate(result)
+            if is_directional_candidate:
+                strategy_inputs = result.get("strategy", {}).get("inputs", {})
+                spot_state_raw = strategy_inputs.get("spot_state", "flat")
+                spot_state = "FLAT" if spot_state_raw == "flat" else "LONG"
+                candidate_side = (
+                    action
+                    if action in ("buy", "sell")
+                    else ("buy" if spot_state_raw == "flat" else "sell")
+                )
+                mid = _safe_float(result.get("market", {}).get("mid_price"))
+                if mid and mid > 0:
+                    ts_str = result.get("timestamp_utc", "")
+                    ts_parsed = ts_str.replace("Z", "+00:00") if ts_str else ""
+                    try:
+                        signal_time = datetime.datetime.fromisoformat(ts_parsed) if ts_parsed else None
+                    except (ValueError, TypeError):
+                        signal_time = None
+                    if signal_time is not None:
+                        training_record = {
+                            "timestamp": ts_str,
+                            "pair": pair,
+                            "runtime_mode": runtime_mode,
+                            "spot_state": spot_state,
+                            "candidate_side": candidate_side,
+                            "decision_reason": result.get("decision_reason", ""),
+                            "signal_strength": result.get("signal_strength"),
+                            "mid_price": round(mid, 2),
+                            "spread": _safe_float(result.get("market", {}).get("spread")),
+                            "book_imbalance": _safe_float(result.get("market", {}).get("book_imbalance")),
+                            "momentum": _safe_float(result.get("market", {}).get("momentum")),
+                            "volatility": _safe_float(result.get("market", {}).get("volatility")),
+                            "momentum_threshold": _safe_float(strategy_inputs.get("momentum_threshold")),
+                            "price_after_30s": None,
+                            "price_after_60s": None,
+                            "price_after_300s": None,
+                            "label_30s": None,
+                            "label_60s": None,
+                            "label_300s": None,
+                            "_signal_time": signal_time,
+                        }
+                        pending_training_examples.append(training_record)
+
             if action in ("buy", "sell"):
                 ts_str = result.get("timestamp_utc", "")
                 price_at_signal = _safe_float(result.get("market", {}).get("mid_price"))
