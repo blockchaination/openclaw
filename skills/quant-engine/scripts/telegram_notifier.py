@@ -161,6 +161,17 @@ def format_engine_stopped(ev: dict) -> str:
     return "\n".join(lines)
 
 
+def format_expectancy_gate_blocked(ev: dict) -> str:
+    """Format expectancy_gate_blocked alert."""
+    pair = ev.get("pair", "?")
+    return (
+        f"<b>OpenClaw Expectancy Gate</b>\n"
+        f"Pair: {pair}\n"
+        f"Status: BLOCKED\n"
+        f"Reason: expectancy_gate_blocked"
+    )
+
+
 def format_kill_switch_triggered(ev: dict) -> str:
     """Format kill_switch_triggered."""
     pair = ev.get("pair", "?")
@@ -224,6 +235,25 @@ def format_status_reply(status: dict) -> str:
     lines.append(f"kill switch: {'ACTIVE' if status.get('kill_switch_active') else 'inactive'}")
     if status.get("live_order_cooldown_active"):
         lines.append("live order cooldown: ACTIVE (15 min)")
+    if status.get("expectancy_gate_enabled"):
+        lines.append(f"expectancy gate mode: {_fmt(status.get('expectancy_gate_mode'))}")
+        lines.append(f"expectancy gate: {_fmt(status.get('expectancy_gate_last_decision'))}")
+        if status.get("expectancy_counterfactual_blocked"):
+            lines.append("expectancy counterfactual blocked: yes")
+        bucket = status.get("expectancy_feature_bucket_summary")
+        if bucket:
+            lines.append(f"expectancy bucket: {bucket}")
+        sc = status.get("expectancy_sample_count")
+        if sc is not None:
+            lines.append(f"expectancy samples: {sc}")
+        mr = status.get("expectancy_mean_return_15m")
+        if mr is not None:
+            lines.append(f"expectancy mean return 15m: {mr:.4f}")
+        wr = status.get("expectancy_win_rate")
+        if wr is not None:
+            lines.append(f"expectancy win rate: {wr:.2%}")
+        if status.get("expectancy_blocked_last_trade"):
+            lines.append("expectancy blocked last trade: yes")
     la = status.get("live_account")
     if la is not None:
         usd = la.get("usd", 0) or 0
@@ -262,3 +292,5 @@ def send_alert_for_event(ev: dict) -> None:
         send_telegram_message(format_engine_stopped(ev))
     elif etype == "kill_switch_triggered":
         send_telegram_message(format_kill_switch_triggered(ev))
+    elif etype == "expectancy_gate_blocked":
+        send_telegram_message(format_expectancy_gate_blocked(ev))

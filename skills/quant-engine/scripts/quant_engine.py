@@ -19,7 +19,10 @@ from pathlib import Path
 from features import spread, mid_price, book_imbalance, short_momentum, volatility
 from paper_broker import PaperBroker
 from paths import (
+    default_decision_events_path,
+    default_labeled_decision_events_path,
     default_log_path,
+    default_price_history_path,
     default_shadow_inference_path,
     default_signal_outcomes_path,
     default_status_path,
@@ -32,6 +35,20 @@ from risk import allow_trade
 from shadow_model import load_model as load_shadow_model
 from shadow_model import score_candidate as shadow_score_candidate
 from strategy import maker_first_mean_reversion
+from decision_logger import log_decision_snapshot
+from decision_features import compute_decision_features
+from outcome_labeler import label_pending_decisions
+from price_history import append_price
+from expectancy_config import (
+    EXPECTANCY_ALLOW_IF_INSUFFICIENT_DATA,
+    EXPECTANCY_GATE_ENABLED,
+    EXPECTANCY_GATE_MODE,
+    EXPECTANCY_MIN_MEAN_RETURN_15M,
+    EXPECTANCY_MIN_SAMPLES,
+    EXPECTANCY_MIN_WIN_RATE,
+    OUTCOME_LABEL_HORIZONS_MINUTES,
+)
+from expectancy_gate import evaluate_expectancy
 from telegram_notifier import (
     format_help_reply,
     format_kill_switch_activated,
@@ -813,6 +830,9 @@ def _run_one_cycle(
     enable_live_orders: bool = False,
     live_account: dict | None = None,
     trade_events_path: Path | None = None,
+    labeled_decision_path: Path | None = None,
+    price_history_path: Path | None = None,
+    decision_events_path: Path | None = None,
 ) -> dict:
     """Run one paper-trading cycle. Returns the result dict."""
     ticker = run_kraken_reader(["--format", "json", "ticker", "--pair", pair])
@@ -890,6 +910,7 @@ def _run_one_cycle(
     skipped_reason: str | None = None
     live_mode_blocked = False
     live_order_ready: dict | None = None
+    expectancy_gate_stats: dict | None = None
 
     if action in ("buy", "sell"):
         if runtime_mode == "live" and live_account is not None:
@@ -929,7 +950,77 @@ def _run_one_cycle(
             skipped_reason = "risk_blocked"
         elif skipped_reason is None and runtime_mode == "live" and not enable_live_orders:
             live_mode_blocked = True
-        elif skipped_reason is None and runtime_mode == "live" and enable_live_orders:
+
+        gate_should_run = (
+            action in ("buy", "sell")
+            and EXPECTANCY_GATE_ENABLED
+            and EXPECTANCY_GATE_MODE != "off"
+            and labeled_decision_path is not None
+        )
+        if gate_should_run:
+            try:
+                ts_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                partial_result = {
+                    "raw_signal": action,
+                    "pair": pair,
+                    "market": {
+                        "mid_price": current_mid_price,
+                        "momentum": current_momentum,
+                        "volatility": current_volatility,
+                        "spread": current_spread,
+                    },
+                    "strategy": decision,
+                    "broker": {"position_units": broker.position_units},
+                }
+                decision_features = compute_decision_features(
+                    partial_result,
+                    ts_utc,
+                    pair,
+                    price_history_path=price_history_path,
+                    decision_events_path=decision_events_path,
+                    trade_events_path=trade_events_path,
+                )
+                gate_input = {
+                    "raw_signal": action,
+                    "signal_direction": action,
+                    "pair": pair,
+                    "market": {
+                        "momentum": current_momentum,
+                        "volatility": current_volatility,
+                        "spread": current_spread,
+                    },
+                    **decision_features,
+                }
+                allowed, gate_reason, gate_stats = evaluate_expectancy(
+                    gate_input,
+                    labeled_decision_path,
+                    allow_if_insufficient=EXPECTANCY_ALLOW_IF_INSUFFICIENT_DATA,
+                    min_samples=EXPECTANCY_MIN_SAMPLES,
+                    min_mean_return=EXPECTANCY_MIN_MEAN_RETURN_15M,
+                    min_win_rate=EXPECTANCY_MIN_WIN_RATE,
+                )
+                expectancy_gate_stats = {**gate_stats, "decision_features": decision_features}
+                if EXPECTANCY_GATE_MODE == "active" and skipped_reason is None and runtime_mode == "live" and enable_live_orders:
+                    if not allowed:
+                        skipped_reason = "expectancy_gate_blocked"
+                    expectancy_gate_stats["expectancy_counterfactual_blocked"] = False
+                elif EXPECTANCY_GATE_MODE == "shadow":
+                    expectancy_gate_stats["expectancy_counterfactual_blocked"] = not allowed
+            except (OSError, TypeError, ValueError, KeyError):
+                expectancy_gate_stats = {
+                    "sample_count": 0,
+                    "mean_return_15m": None,
+                    "win_rate": None,
+                    "blocked": False,
+                    "expectancy_gate_decision": "error",
+                    "expectancy_gate_reason": "exception",
+                    "expectancy_feature_bucket_summary": "",
+                    "expectancy_counterfactual_blocked": None,
+                }
+                if EXPECTANCY_GATE_MODE == "active" and skipped_reason is None and runtime_mode == "live" and enable_live_orders:
+                    if not EXPECTANCY_ALLOW_IF_INSUFFICIENT_DATA:
+                        skipped_reason = "expectancy_gate_blocked"
+        if skipped_reason is None and runtime_mode == "live" and enable_live_orders:
             ordertype = "limit" if execution_mode == "maker" else "market"
             if ordertype == "limit":
                 price = best_bid if action == "buy" else best_ask
@@ -1038,6 +1129,8 @@ def _run_one_cycle(
         "live_order_ready": live_order_ready,
         "live_account": live_account,
     }
+    if expectancy_gate_stats is not None:
+        out["expectancy_gate_stats"] = expectancy_gate_stats
     if is_directional:
         out["candidate_side"] = candidate_side
         out["candidate_reason"] = candidate_reason
@@ -1116,6 +1209,20 @@ def _build_status(
         out["candidate_reason"] = r["candidate_reason"]
     if r.get("runtime_reason") is not None:
         out["runtime_reason"] = r["runtime_reason"]
+    eg = r.get("expectancy_gate_stats") or {}
+    out["expectancy_gate_enabled"] = EXPECTANCY_GATE_ENABLED
+    out["expectancy_gate_mode"] = EXPECTANCY_GATE_MODE if EXPECTANCY_GATE_ENABLED else "off"
+    out["expectancy_gate_last_decision"] = (
+        eg.get("expectancy_gate_decision") or ("blocked" if eg.get("blocked") else ("passed" if eg else "n/a"))
+    )
+    out["expectancy_counterfactual_blocked"] = eg.get("expectancy_counterfactual_blocked")
+    out["expectancy_feature_bucket_summary"] = eg.get("expectancy_feature_bucket_summary")
+    out["expectancy_sample_count"] = eg.get("sample_count")
+    out["expectancy_mean_return_15m"] = eg.get("mean_return_15m")
+    out["expectancy_win_rate"] = eg.get("win_rate")
+    out["expectancy_blocked_last_trade"] = (
+        r.get("decision_reason") == "expectancy_gate_blocked"
+    )
     return out
 
 
@@ -1199,6 +1306,24 @@ def main() -> int:
         type=str,
         default=None,
         help="Path to trade events JSONL (default: <repo_root>/logs/trade_events.jsonl).",
+    )
+    parser.add_argument(
+        "--decision-events-file",
+        type=str,
+        default=None,
+        help="Path to decision events JSONL (default: <repo_root>/data/decision_events.jsonl).",
+    )
+    parser.add_argument(
+        "--labeled-decision-events-file",
+        type=str,
+        default=None,
+        help="Path to labeled decision events JSONL (default: <repo_root>/data/labeled_decision_events.jsonl).",
+    )
+    parser.add_argument(
+        "--price-history-file",
+        type=str,
+        default=None,
+        help="Path to price history JSONL (default: <repo_root>/data/price_history.jsonl).",
     )
     parser.add_argument(
         "--check-kraken-auth",
@@ -1291,6 +1416,21 @@ def main() -> int:
         default_trade_events_path()
         if args.trade_events_file is None
         else Path(args.trade_events_file)
+    )
+    decision_events_path = (
+        default_decision_events_path()
+        if args.decision_events_file is None
+        else Path(args.decision_events_file)
+    )
+    labeled_decision_events_path = (
+        default_labeled_decision_events_path()
+        if args.labeled_decision_events_file is None
+        else Path(args.labeled_decision_events_file)
+    )
+    price_history_path = (
+        default_price_history_path()
+        if args.price_history_file is None
+        else Path(args.price_history_file)
     )
     signal_outcomes_path = default_signal_outcomes_path()
     training_examples_path = default_training_examples_path()
@@ -1545,8 +1685,31 @@ def main() -> int:
                 enable_live_orders=enable_live_orders,
                 live_account=live_account,
                 trade_events_path=trade_events_path,
+                labeled_decision_path=labeled_decision_events_path,
+                price_history_path=price_history_path,
+                decision_events_path=decision_events_path,
             )
             last_result = result
+
+            try:
+                append_price(
+                    price_history_path,
+                    result.get("timestamp_utc", ""),
+                    pair,
+                    _safe_float(result.get("market", {}).get("mid_price")),
+                )
+            except (OSError, TypeError, ValueError):
+                pass
+
+            try:
+                label_pending_decisions(
+                    decision_events_path,
+                    labeled_decision_events_path,
+                    price_history_path,
+                    horizons_minutes=OUTCOME_LABEL_HORIZONS_MINUTES,
+                )
+            except (OSError, TypeError, ValueError):
+                pass
 
             _apply_shadow_inference(result, shadow_model_obj, shadow_inference_path)
 
@@ -1984,6 +2147,30 @@ def main() -> int:
                         "reason": "live_order_cooldown_active",
                     },
                 )
+            if skip == "expectancy_gate_blocked":
+                append_trade_event(
+                    trade_events_path,
+                    {
+                        "timestamp": result.get("timestamp_utc", ""),
+                        "event_type": "expectancy_gate_blocked",
+                        "pair": pair,
+                        "runtime_mode": runtime_mode,
+                        "execution_mode": execution_mode,
+                        "iteration": i + 1,
+                        "side": action,
+                        "reason": "expectancy_gate_blocked",
+                    },
+                )
+                try:
+                    send_alert_for_event(
+                        {
+                            "event_type": "expectancy_gate_blocked",
+                            "pair": pair,
+                            "reason": "expectancy_gate_blocked",
+                        }
+                    )
+                except (OSError, TypeError, ValueError):
+                    pass
             if live_blocked:
                 append_trade_event(
                     trade_events_path,
@@ -2038,6 +2225,44 @@ def main() -> int:
                             ),
                         },
                     )
+
+            # Decision snapshot (after live order block so trade_submitted is correct)
+            try:
+                cooldown = "cooldown" in (result.get("decision_reason") or "")
+                order_size = None
+                if result.get("live_order_ready"):
+                    order_size = result["live_order_ready"].get("size_usd")
+                trade_submitted = result.get("live_order_outcome") == "live_submitted" or (
+                    result.get("order", {}).get("submitted") or False
+                )
+                decision_features = compute_decision_features(
+                    result,
+                    result.get("timestamp_utc", ""),
+                    pair,
+                    price_history_path=price_history_path,
+                    decision_events_path=decision_events_path,
+                    trade_events_path=trade_events_path,
+                )
+                eg = result.get("expectancy_gate_stats") or {}
+                log_decision_snapshot(
+                    result,
+                    decision_events_path,
+                    cooldown_active=cooldown,
+                    kill_switch_active=False,
+                    order_size_usd_candidate=order_size,
+                    trade_submitted=trade_submitted,
+                    decision_features=decision_features,
+                    expectancy_gate_mode=EXPECTANCY_GATE_MODE if EXPECTANCY_GATE_ENABLED else "off",
+                    expectancy_gate_decision=eg.get("expectancy_gate_decision"),
+                    expectancy_gate_reason=eg.get("expectancy_gate_reason"),
+                    expectancy_sample_count=eg.get("sample_count"),
+                    expectancy_mean_return_15m=eg.get("mean_return_15m"),
+                    expectancy_win_rate=eg.get("win_rate"),
+                    expectancy_feature_bucket_summary=eg.get("expectancy_feature_bucket_summary"),
+                    expectancy_counterfactual_blocked=eg.get("expectancy_counterfactual_blocked"),
+                )
+            except (OSError, TypeError, ValueError):
+                pass
 
             status_err = None
             if result.get("live_order_outcome") == "live_failed":

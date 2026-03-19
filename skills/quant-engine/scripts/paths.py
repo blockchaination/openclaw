@@ -55,8 +55,24 @@ def default_log_path() -> Path:
     return repo_root() / "logs" / "quant_engine_runs.jsonl"
 
 
+def default_decision_events_path() -> Path:
+    """<repo_root>/data/decision_events.jsonl"""
+    return repo_root() / "data" / "decision_events.jsonl"
+
+
+def default_labeled_decision_events_path() -> Path:
+    """<repo_root>/data/labeled_decision_events.jsonl"""
+    return repo_root() / "data" / "labeled_decision_events.jsonl"
+
+
+def default_price_history_path() -> Path:
+    """<repo_root>/data/price_history.jsonl"""
+    return repo_root() / "data" / "price_history.jsonl"
+
+
 def ensure_logs_and_artifacts_dirs() -> None:
     """Create logs/ and artifacts/ under repo root if they do not exist."""
     root = repo_root()
     (root / "logs").mkdir(parents=True, exist_ok=True)
     (root / "artifacts").mkdir(parents=True, exist_ok=True)
+    (root / "data").mkdir(parents=True, exist_ok=True)
