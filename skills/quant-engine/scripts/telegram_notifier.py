@@ -222,6 +222,8 @@ def format_status_reply(status: dict) -> str:
     if prob is not None:
         lines.append(f"model probability: {prob:.4f}")
     lines.append(f"kill switch: {'ACTIVE' if status.get('kill_switch_active') else 'inactive'}")
+    if status.get("live_order_cooldown_active"):
+        lines.append("live order cooldown: ACTIVE (15 min)")
     la = status.get("live_account")
     if la is not None:
         usd = la.get("usd", 0) or 0

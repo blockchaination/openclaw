@@ -20,8 +20,8 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from quant_engine import (
+    FIRST_LIVE_ORDER_USD,
     MIN_SECONDS_BETWEEN_SAME_SIDE_ACTIONS,
-    MIN_USD_TO_BUY,
     MIN_XBT_TO_SELL,
     _last_same_side_action_timestamp,
 )
@@ -37,7 +37,7 @@ def _action_eligible_and_skip(
     if action == "buy":
         if runtime_mode == "live" and live_account is not None:
             usd = live_account.get("usd", 0) or 0
-            buy_eligible = usd >= MIN_USD_TO_BUY
+            buy_eligible = usd >= FIRST_LIVE_ORDER_USD
             if not buy_eligible:
                 return False, "buy_suppressed_low_usd"
             return True, None
@@ -122,7 +122,7 @@ def test_live_buy_low_usd_suppressed() -> None:
     """live mode + live_account + buy + low USD => hold with buy_suppressed_low_usd."""
     eligible, skip = _action_eligible_and_skip(
         runtime_mode="live",
-        live_account={"usd": 5.0, "xbt": 0.001},
+        live_account={"usd": 3.0, "xbt": 0.001},
         action="buy",
         broker_position=0.0,
     )
@@ -155,10 +155,10 @@ def test_paper_buy_mode_unchanged() -> None:
 
 
 def test_min_usd_threshold_boundary() -> None:
-    """USD exactly at MIN_USD_TO_BUY is eligible."""
+    """USD exactly at FIRST_LIVE_ORDER_USD is eligible."""
     eligible, skip = _action_eligible_and_skip(
         runtime_mode="live",
-        live_account={"usd": MIN_USD_TO_BUY, "xbt": 0.0},
+        live_account={"usd": FIRST_LIVE_ORDER_USD, "xbt": 0.0},
         action="buy",
         broker_position=0.0,
     )

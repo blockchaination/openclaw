@@ -138,6 +138,9 @@ def main() -> int:
     )
     n_buy_cooldown = sum(1 for e in events if e.get("event_type") == "buy_cooldown_active")
     n_sell_cooldown = sum(1 for e in events if e.get("event_type") == "sell_cooldown_active")
+    n_live_order_cooldown = sum(
+        1 for e in events if e.get("event_type") == "live_order_cooldown_active"
+    )
     n_engine_error = sum(1 for e in events if e.get("event_type") == "engine_error")
 
     # Last buy/sell signal timestamps
@@ -168,6 +171,7 @@ def main() -> int:
             "buy_suppressed_low_usd",
             "buy_cooldown_active",
             "sell_cooldown_active",
+            "live_order_cooldown_active",
         )
     ]
     reason_counts: dict[str, int] = {}
@@ -267,6 +271,7 @@ def main() -> int:
     lines.append(f"buy_suppressed_low_usd:    {n_buy_suppressed}")
     lines.append(f"buy_cooldown_active:       {n_buy_cooldown}")
     lines.append(f"sell_cooldown_active:      {n_sell_cooldown}")
+    lines.append(f"live_order_cooldown_active: {n_live_order_cooldown}")
     lines.append(f"live_order_submitted:      {n_live_order_submitted}")
     lines.append(f"live_order_submission_failed: {n_live_order_failed}")
     lines.append(f"forced_live_test_buy_submitted: {n_forced_buy}")

@@ -153,6 +153,8 @@ def main() -> int:
         if prob is not None:
             lines.append(f"model probability: {prob:.4f}")
         lines.append(f"kill switch:     {'ACTIVE' if status.get('kill_switch_active') else 'inactive'}")
+        if status.get("live_order_cooldown_active"):
+            lines.append("live order cooldown: ACTIVE (15 min)")
         if status.get("shutdown_reason"):
             lines.append(f"shutdown reason: {status['shutdown_reason']}")
         if status.get("error"):

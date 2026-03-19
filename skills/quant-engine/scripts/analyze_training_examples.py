@@ -42,6 +42,7 @@ def _load_completed_records(path: Path) -> list[dict]:
 
 _RUNTIME_ONLY_REASONS = frozenset({
     "live_mode_blocked",
+    "live_order_cooldown_active",
     "buy_cooldown_active",
     "sell_cooldown_active",
     "risk_blocked",

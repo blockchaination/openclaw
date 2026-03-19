@@ -91,13 +91,14 @@ def test_flat_weak_entry_becomes_hold() -> None:
         mid_price=50000.0,
         spread=10.0,
         book_imbalance=0.05,
-        momentum=-2.0,
+        momentum=-1.4,
         volatility=20.0 / 3.0,
         xbt_inventory=XBT_FLAT,
     )
     assert decision["action"] == "hold"
     assert decision["reason"] == "weak_signal_filtered"
-    assert decision["signal_strength"] == 2.0
+    assert decision["signal_strength"] == 1.4
+    assert abs(decision["signal_strength"]) < MIN_SIGNAL_STRENGTH
 
 
 def test_long_weak_exit_becomes_hold() -> None:
@@ -106,13 +107,14 @@ def test_long_weak_exit_becomes_hold() -> None:
         mid_price=50000.0,
         spread=10.0,
         book_imbalance=-0.05,
-        momentum=2.0,
+        momentum=1.4,
         volatility=20.0 / 3.0,
         xbt_inventory=XBT_LONG,
     )
     assert decision["action"] == "hold"
     assert decision["reason"] == "weak_signal_filtered"
-    assert decision["signal_strength"] == -2.0
+    assert decision["signal_strength"] == -1.4
+    assert abs(decision["signal_strength"]) < MIN_SIGNAL_STRENGTH
 
 
 def test_no_mean_reversion_signal_strength_none_in_result_and_status() -> None:

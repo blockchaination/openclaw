@@ -1,6 +1,6 @@
 """Strategy logic."""
 
-MIN_SIGNAL_STRENGTH = 3.0
+MIN_SIGNAL_STRENGTH = 1.5
 
 # Spot state threshold: XBT < this => FLAT (entry only), XBT >= this => LONG (exit only)
 MIN_XBT_TO_SELL = 0.0002

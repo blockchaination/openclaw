@@ -44,9 +44,11 @@ from telegram_notifier import (
 )
 
 MAX_LIVE_ORDER_USD = 10
+FIRST_LIVE_ORDER_USD = 5.0
 MIN_USD_TO_BUY = 10.0
 MIN_XBT_TO_SELL = 0.0002
 MIN_SECONDS_BETWEEN_SAME_SIDE_ACTIONS = 300
+MIN_SECONDS_BETWEEN_LIVE_ORDERS = 900
 
 
 def _repo_root() -> Path:
@@ -139,6 +141,42 @@ def _last_same_side_action_timestamp(path: Path, side: str) -> datetime.datetime
                 if etype not in target:
                     continue
                 if etype == "live_order_submitted" and ev.get("side") != side:
+                    continue
+                ts_str = ev.get("timestamp", "")
+                if not ts_str:
+                    continue
+                ts_str = ts_str.replace("Z", "+00:00")
+                try:
+                    ts = datetime.datetime.fromisoformat(ts_str)
+                except (ValueError, TypeError):
+                    continue
+                if last_ts is None or (ts > last_ts):
+                    last_ts = ts
+    except OSError:
+        return None
+    return last_ts
+
+
+def _last_live_order_timestamp(path: Path) -> datetime.datetime | None:
+    """
+    Return timestamp of most recent actual live order submission.
+    Events: live_order_submitted (any side), forced_live_test_buy_submitted.
+    """
+    if not path.exists():
+        return None
+    target_events = ("live_order_submitted", "forced_live_test_buy_submitted")
+    last_ts: datetime.datetime | None = None
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("event_type", "") not in target_events:
                     continue
                 ts_str = ev.get("timestamp", "")
                 if not ts_str:
@@ -841,7 +879,8 @@ def _run_one_cycle(
         if runtime_mode == "live" and live_account is not None:
             usd = live_account.get("usd", 0) or 0
             xbt = live_account.get("xbt", 0) or 0
-            buy_eligible = usd >= MIN_USD_TO_BUY
+            # Live mode: need at least FIRST_LIVE_ORDER_USD for buy
+            buy_eligible = usd >= FIRST_LIVE_ORDER_USD
             sell_eligible = xbt >= MIN_XBT_TO_SELL
             if action == "buy" and not buy_eligible:
                 skipped_reason = "buy_suppressed_low_usd"
@@ -853,15 +892,23 @@ def _run_one_cycle(
                 skipped_reason = "no_inventory_to_sell"
         if skipped_reason is None and runtime_mode == "live" and trade_events_path is not None:
             now_utc = datetime.datetime.now(datetime.timezone.utc)
-            last_ts = _last_same_side_action_timestamp(trade_events_path, action)
-            if last_ts is not None:
-                if last_ts.tzinfo is None:
-                    last_ts = last_ts.replace(tzinfo=datetime.timezone.utc)
-                elapsed = (now_utc - last_ts).total_seconds()
-                if elapsed < MIN_SECONDS_BETWEEN_SAME_SIDE_ACTIONS:
-                    skipped_reason = (
-                        "buy_cooldown_active" if action == "buy" else "sell_cooldown_active"
-                    )
+            # 15-min cooldown: any live order submission blocks next submission
+            last_live = _last_live_order_timestamp(trade_events_path)
+            if last_live is not None and enable_live_orders:
+                if last_live.tzinfo is None:
+                    last_live = last_live.replace(tzinfo=datetime.timezone.utc)
+                if (now_utc - last_live).total_seconds() < MIN_SECONDS_BETWEEN_LIVE_ORDERS:
+                    skipped_reason = "live_order_cooldown_active"
+            if skipped_reason is None:
+                last_ts = _last_same_side_action_timestamp(trade_events_path, action)
+                if last_ts is not None:
+                    if last_ts.tzinfo is None:
+                        last_ts = last_ts.replace(tzinfo=datetime.timezone.utc)
+                    elapsed = (now_utc - last_ts).total_seconds()
+                    if elapsed < MIN_SECONDS_BETWEEN_SAME_SIDE_ACTIONS:
+                        skipped_reason = (
+                            "buy_cooldown_active" if action == "buy" else "sell_cooldown_active"
+                        )
         if skipped_reason is None and not risk_result.get("allowed"):
             skipped_reason = "risk_blocked"
         elif skipped_reason is None and runtime_mode == "live" and not enable_live_orders:
@@ -872,13 +919,23 @@ def _run_one_cycle(
                 price = best_bid if action == "buy" else best_ask
             else:
                 price = None
-            size_units = usd_order_size / current_mid_price
+            available_usd = float(live_account.get("usd", 0) or 0) if live_account else 0.0
+            if action == "buy":
+                effective_size_usd = min(
+                    FIRST_LIVE_ORDER_USD,
+                    available_usd,
+                    MAX_LIVE_ORDER_USD,
+                    usd_order_size,
+                )
+            else:
+                effective_size_usd = min(usd_order_size, MAX_LIVE_ORDER_USD)
+            size_units = effective_size_usd / current_mid_price
             live_order_ready = {
                 "side": action,
                 "ordertype": ordertype,
                 "volume": size_units,
                 "price": price,
-                "size_usd": usd_order_size,
+                "size_usd": effective_size_usd,
             }
         elif skipped_reason is None:
             size_units = usd_order_size / current_mid_price
@@ -1012,6 +1069,7 @@ def _build_status(
         raw_signal = r.get("raw_signal", strategy.get("action", "hold"))
         final_action = r.get("final_action", last_action)
         decision_reason = r.get("decision_reason", order.get("skipped_reason") or "hold")
+    live_order_cooldown = r.get("decision_reason") == "live_order_cooldown_active"
     out: dict = {
         "timestamp": r.get("timestamp_utc")
         or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1020,6 +1078,7 @@ def _build_status(
         "execution_mode": r.get("execution_mode", "taker"),
         "iteration": r.get("iteration", 0),
         "kill_switch_active": kill_switch_active,
+        "live_order_cooldown_active": live_order_cooldown,
         "last_signal": strategy.get("action", "hold"),
         "last_action": last_action,
         "raw_signal": raw_signal,
@@ -1496,7 +1555,13 @@ def main() -> int:
             if force_live_test_buy and i == 0:
                 ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 mid = _safe_float(result.get("market", {}).get("mid_price"))
-                size_usd = usd_order_size
+                available_usd = float(live_account.get("usd", 0) or 0) if live_account else 0.0
+                size_usd = min(
+                    FIRST_LIVE_ORDER_USD,
+                    available_usd,
+                    MAX_LIVE_ORDER_USD,
+                    usd_order_size,
+                )
                 volume = size_usd / mid if mid > 0 else 0.0
                 append_trade_event(
                     trade_events_path,
@@ -1905,6 +1970,20 @@ def main() -> int:
                         "iteration": i + 1,
                         "side": "sell",
                         "reason": "sell_cooldown_active",
+                    },
+                )
+            if skip == "live_order_cooldown_active":
+                append_trade_event(
+                    trade_events_path,
+                    {
+                        "timestamp": result.get("timestamp_utc", ""),
+                        "event_type": "live_order_cooldown_active",
+                        "pair": pair,
+                        "runtime_mode": runtime_mode,
+                        "execution_mode": execution_mode,
+                        "iteration": i + 1,
+                        "side": action,
+                        "reason": "live_order_cooldown_active",
                     },
                 )
             if live_blocked:
