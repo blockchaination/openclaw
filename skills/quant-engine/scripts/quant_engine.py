@@ -45,6 +45,22 @@ from telegram_notifier import (
 
 MAX_LIVE_ORDER_USD = 10
 FIRST_LIVE_ORDER_USD = 5.0
+
+
+def _effective_live_buy_usd(
+    available_usd: float,
+    requested_usd: float,
+) -> float:
+    """
+    Single source of truth for live buy order size.
+    Returns min(FIRST_LIVE_ORDER_USD, available_usd, MAX_LIVE_ORDER_USD, requested_usd).
+    """
+    return min(
+        FIRST_LIVE_ORDER_USD,
+        available_usd,
+        MAX_LIVE_ORDER_USD,
+        requested_usd,
+    )
 MIN_USD_TO_BUY = 10.0
 MIN_XBT_TO_SELL = 0.0002
 MIN_SECONDS_BETWEEN_SAME_SIDE_ACTIONS = 300
@@ -921,12 +937,7 @@ def _run_one_cycle(
                 price = None
             available_usd = float(live_account.get("usd", 0) or 0) if live_account else 0.0
             if action == "buy":
-                effective_size_usd = min(
-                    FIRST_LIVE_ORDER_USD,
-                    available_usd,
-                    MAX_LIVE_ORDER_USD,
-                    usd_order_size,
-                )
+                effective_size_usd = _effective_live_buy_usd(available_usd, usd_order_size)
             else:
                 effective_size_usd = min(usd_order_size, MAX_LIVE_ORDER_USD)
             size_units = effective_size_usd / current_mid_price
@@ -1673,9 +1684,19 @@ def main() -> int:
                 ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 side = live_order_ready["side"]
                 ordertype = live_order_ready["ordertype"]
-                size_usd = live_order_ready["size_usd"]
-                volume = live_order_ready["volume"]
                 price = live_order_ready.get("price")
+                mid = _safe_float(result.get("market", {}).get("mid_price"))
+                available_usd = float(live_account.get("usd", 0) or 0) if live_account else 0.0
+                if side == "buy":
+                    effective_live_order_usd = _effective_live_buy_usd(
+                        available_usd, live_order_ready["size_usd"]
+                    )
+                else:
+                    effective_live_order_usd = min(
+                        live_order_ready["size_usd"],
+                        MAX_LIVE_ORDER_USD,
+                    )
+                volume = effective_live_order_usd / mid if mid > 0 else 0.0
                 if ordertype == "limit" and (price is None or price <= 0):
                     append_trade_event(
                         trade_events_path,
@@ -1687,7 +1708,7 @@ def main() -> int:
                             "execution_mode": execution_mode,
                             "side": side,
                             "order_type": ordertype,
-                            "size_usd": size_usd,
+                            "size_usd": effective_live_order_usd,
                             "reason": "no_limit_price",
                         },
                     )
@@ -1703,25 +1724,9 @@ def main() -> int:
                             "execution_mode": execution_mode,
                             "side": side,
                             "order_type": ordertype,
-                            "size_usd": size_usd,
+                            "size_usd": effective_live_order_usd,
                             "volume": volume,
                             "reason": "invalid_order_volume",
-                        },
-                    )
-                    result["live_order_outcome"] = "live_blocked"
-                elif size_usd > MAX_LIVE_ORDER_USD:
-                    append_trade_event(
-                        trade_events_path,
-                        {
-                            "timestamp": ts,
-                            "event_type": "live_order_blocked",
-                            "pair": pair,
-                            "runtime_mode": runtime_mode,
-                            "execution_mode": execution_mode,
-                            "side": side,
-                            "order_type": ordertype,
-                            "size_usd": size_usd,
-                            "reason": "max_live_order_usd_exceeded",
                         },
                     )
                     result["live_order_outcome"] = "live_blocked"
@@ -1737,7 +1742,7 @@ def main() -> int:
                                 "execution_mode": execution_mode,
                                 "side": side,
                                 "order_type": ordertype,
-                                "size_usd": size_usd,
+                                "size_usd": effective_live_order_usd,
                                 "volume": volume,
                                 "price": price,
                             },
@@ -1774,7 +1779,7 @@ def main() -> int:
                             "execution_mode": execution_mode,
                             "side": side,
                             "order_type": ordertype,
-                            "size_usd": size_usd,
+                            "size_usd": effective_live_order_usd,
                             "volume": volume,
                             "price": price,
                             "reason": result.get("decision_reason")
@@ -1799,7 +1804,7 @@ def main() -> int:
                             "execution_mode": execution_mode,
                             "side": side,
                             "order_type": ordertype,
-                            "size_usd": size_usd,
+                            "size_usd": effective_live_order_usd,
                             "volume": volume,
                             "reason": err_msg,
                         }

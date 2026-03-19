@@ -22,6 +22,7 @@ from quant_engine import (
     MAX_LIVE_ORDER_USD,
     MIN_SECONDS_BETWEEN_LIVE_ORDERS,
     _build_status,
+    _effective_live_buy_usd,
     _last_live_order_timestamp,
 )
 from strategy import MIN_SIGNAL_STRENGTH, maker_first_mean_reversion
@@ -31,16 +32,43 @@ def test_live_buy_effective_size_capped_to_first_live_order_usd() -> None:
     """Live buy order size is capped to min(FIRST_LIVE_ORDER_USD, available_usd, MAX_LIVE_ORDER_USD)."""
     assert FIRST_LIVE_ORDER_USD == 5.0
     assert MAX_LIVE_ORDER_USD == 10.0
-    # Cap ensures we never exceed 5 USD for first live buys
-    effective = min(FIRST_LIVE_ORDER_USD, 100.0, MAX_LIVE_ORDER_USD, 20.0)
+    effective = _effective_live_buy_usd(available_usd=100.0, requested_usd=20.0)
     assert effective == FIRST_LIVE_ORDER_USD
 
 
-def test_order_size_never_exceeds_first_live_order_usd() -> None:
-    """Order size for buy never exceeds FIRST_LIVE_ORDER_USD when capped."""
-    for available in (5.0, 10.0, 100.0):
-        effective = min(FIRST_LIVE_ORDER_USD, available, MAX_LIVE_ORDER_USD, 20.0)
+def test_live_buy_submission_path_uses_5_usd_max() -> None:
+    """_effective_live_buy_usd returns 5.0 max for first-live-trade mode."""
+    assert _effective_live_buy_usd(100.0, 20.0) == 5.0
+    assert _effective_live_buy_usd(50.0, 15.0) == 5.0
+    assert _effective_live_buy_usd(10.0, 20.0) == 5.0
+
+
+def test_live_order_blocked_never_reports_20_for_first_live_trade() -> None:
+    """Effective size is always <= 5, so live_order_blocked never logs size_usd 20."""
+    for requested in (20.0, 50.0, 100.0):
+        effective = _effective_live_buy_usd(available_usd=100.0, requested_usd=requested)
         assert effective <= FIRST_LIVE_ORDER_USD
+        assert effective != 20.0
+
+
+def test_volume_derived_from_capped_usd() -> None:
+    """Volume = effective_usd / mid_price; capped USD yields correct volume."""
+    effective = _effective_live_buy_usd(100.0, 20.0)
+    assert effective == 5.0
+    mid = 100000.0
+    volume = effective / mid
+    assert volume == 0.00005
+
+
+def test_max_live_order_usd_guard_if_first_increased() -> None:
+    """MAX_LIVE_ORDER_USD guard still applies if FIRST_LIVE_ORDER_USD were increased."""
+    # With current constants: FIRST=5, MAX=10. Requested 20 -> min(5,100,10,20)=5
+    effective = _effective_live_buy_usd(100.0, 20.0)
+    assert effective <= MAX_LIVE_ORDER_USD
+    # If available is 15, we'd get min(5,15,10,20)=5. MAX caps at 10.
+    effective2 = _effective_live_buy_usd(15.0, 20.0)
+    assert effective2 == 5.0
+    assert effective2 <= MAX_LIVE_ORDER_USD
 
 
 def test_live_order_cooldown_blocks_repeated_orders() -> None:
