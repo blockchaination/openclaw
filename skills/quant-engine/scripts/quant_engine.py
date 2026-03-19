@@ -1430,6 +1430,7 @@ def main() -> int:
     telegram_offset = 0
     last_telegram_check = time.time()
     TELEGRAM_POLL_INTERVAL = 8
+    kill_switch_alert_sent = False
 
     try:
         for i in range(iterations):
@@ -1442,38 +1443,30 @@ def main() -> int:
                 last_telegram_check = now
 
             if kill_switch_path.exists():
-                ts = datetime.datetime.now(datetime.timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                )
-                ev_kill = {
-                    "timestamp": ts,
-                    "event_type": "kill_switch_triggered",
-                    "pair": pair,
-                    "runtime_mode": runtime_mode,
-                    "execution_mode": execution_mode,
-                    "iteration": i + 1,
-                    "reason": "kill switch file exists",
-                }
-                append_trade_event(trade_events_path, ev_kill)
-                send_alert_for_event(ev_kill)
                 status = _build_status(
                     last_result, True, "kill_switch", None, pair_fallback=pair
                 )
                 write_status(status_path, status)
-                shutdown_reason = "kill_switch"
-                append_trade_event(
-                    trade_events_path,
-                    {
+                if not kill_switch_alert_sent:
+                    ts = datetime.datetime.now(datetime.timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    )
+                    ev_kill = {
                         "timestamp": ts,
-                        "event_type": "engine_stopped",
+                        "event_type": "kill_switch_triggered",
                         "pair": pair,
                         "runtime_mode": runtime_mode,
                         "execution_mode": execution_mode,
                         "iteration": i + 1,
-                        "reason": "kill_switch",
-                    },
-                )
-                break
+                        "reason": "kill switch file exists",
+                    }
+                    append_trade_event(trade_events_path, ev_kill)
+                    send_alert_for_event(ev_kill)
+                    kill_switch_alert_sent = True
+                time.sleep(max(sleep_seconds, 1))
+                continue
+
+            kill_switch_alert_sent = False
 
             # Best-effort: process one pending signal outcome per iteration (non-blocking)
             now_utc = datetime.datetime.now(datetime.timezone.utc)
